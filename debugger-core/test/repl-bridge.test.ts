@@ -54,6 +54,13 @@ function setup(): Setup {
 			{ id: 7, name: "main", source: { path: "/tmp/main.c" }, line: 12, column: 1 },
 		],
 	}));
+	fake.onRequest("setBreakpoints", (args) => ({
+		breakpoints: (args?.breakpoints ?? []).map((bp: any, i: number) => ({
+			id: i + 1,
+			verified: true,
+			line: bp.line,
+		})),
+	}));
 	const stateMachine = new SessionStateMachine(bus);
 	const api = createDebuggerAPI(fake as any, bus, stateMachine);
 	return { api, bus, fake };
@@ -172,10 +179,71 @@ describe("active thread tracking", () => {
 	});
 });
 
-describe("evaluate passthrough", () => {
-	it("defaults to watch context with the top frame", async () => {
+describe("lifecycle relaunch", () => {
+	it("allows relaunching after the target exited", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app");
+		bus.emit("session:exited", { exitCode: 0 });
+
+		await api.launch("./app");
+
+		expect(fake.requests.filter((r) => r.command === "launch")).toHaveLength(2);
+	});
+
+	it("clears tracked location on relaunch", async () => {
+		const { api, bus } = setup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 1 });
+		await flushAsync();
+		bus.emit("session:exited", { exitCode: 0 });
+
+		await api.launch("./app");
+
+		expect(api.sourceFile).toBeNull();
+		expect(api.currentLine).toBe(0);
+	});
+});
+
+describe("breakpoint management", () => {
+	it("sends the full per-file list so earlier breakpoints survive", async () => {
 		const { api, fake } = setup();
+		await api.launch("./app");
+
+		await api.setBreakpoint("/tmp/main.c", 12);
+		await api.setBreakpoint("/tmp/main.c", 20);
+
+		const calls = fake.requests.filter((r) => r.command === "setBreakpoints");
+		expect(calls[0].args.breakpoints).toEqual([{ line: 12, condition: undefined }]);
+		expect(calls[1].args.breakpoints).toEqual([
+			{ line: 12, condition: undefined },
+			{ line: 20, condition: undefined },
+		]);
+		const lines = (await api.listBreakpoints()).map((bp) => bp.line);
+		expect(lines).toEqual([12, 20]);
+	});
+
+	it("removes one breakpoint without dropping the others in the file", async () => {
+		const { api, fake } = setup();
+		await api.launch("./app");
+
+		const first = await api.setBreakpoint("/tmp/main.c", 12);
+		await api.setBreakpoint("/tmp/main.c", 20);
+		await api.removeBreakpoint(first.id);
+
+		const lastCall = fake.requests.filter((r) => r.command === "setBreakpoints").at(-1);
+		expect(lastCall?.args.breakpoints).toEqual([{ line: 20, condition: undefined }]);
+		const lines = (await api.listBreakpoints()).map((bp) => bp.line);
+		expect(lines).toEqual([20]);
+	});
+});
+
+describe("evaluate passthrough", () => {
+	it("defaults to watch context with the top frame while stopped", async () => {
+		const { api, bus, fake } = setup();
 		fake.onRequest("evaluate", () => ({ result: "$1 = 42" }));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
 
 		const result = await api.evaluate("print x");
 
@@ -183,6 +251,18 @@ describe("evaluate passthrough", () => {
 		const evalReq = fake.requests.find((r) => r.command === "evaluate");
 		expect(evalReq?.args.context).toBe("watch");
 		expect(evalReq?.args.frameId).toBe(7);
+	});
+
+	it("omits the frame when the target is not stopped", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("evaluate", () => ({ result: "done" }));
+		await api.launch("./app");
+
+		await api.evaluate("print x", "repl");
+
+		expect(fake.requests.some((r) => r.command === "stackTrace")).toBe(false);
+		const evalReq = fake.requests.find((r) => r.command === "evaluate");
+		expect(evalReq?.args.frameId).toBeUndefined();
 	});
 
 	it("allows an explicit repl context for raw GDB commands", async () => {
@@ -193,5 +273,17 @@ describe("evaluate passthrough", () => {
 
 		const evalReq = fake.requests.find((r) => r.command === "evaluate");
 		expect(evalReq?.args.context).toBe("repl");
+	});
+});
+
+describe("stack resilience", () => {
+	it("returns an empty stack instead of leaking DAP errors", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("stackTrace", () => {
+			throw new Error("'NoneType' object has no attribute 'global_num'");
+		});
+
+		expect(await api.getStack()).toEqual([]);
+		expect(await api.getVariables()).toEqual([]);
 	});
 });
