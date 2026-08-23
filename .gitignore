@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output (tsc -p tsconfig.build.json)
+debugger-core/dist/
+*.tsbuildinfo
+
+# Compiled test program (gcc -g test/test.c)
+test/test
+/example
+*.o
+
+# Planning notes / generated docs
+*.html
+
+# Test coverage / cache
+coverage/
+.vitest/
+*.log
+
+# Editor & OS artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

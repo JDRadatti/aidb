@@ -1,0 +1,50 @@
+{
+	"name": "@earendil-works/pi-debugger-core",
+	"version": "0.84.2",
+	"description": "GDB debugger core extension for Pi - DAP protocol client, session management, and REPL bridge",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "npx tsc -p tsconfig.build.json",
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@vscode/debugprotocol": "1.68.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.84.2"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19",
+		"shx": "0.4.0",
+		"tsx": "^4.23.12",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"keywords": [
+		"debugger",
+		"gdb",
+		"dap",
+		"debug-adapter-protocol"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/earendil-works/pi.git",
+		"directory": "packages/debugger-core"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

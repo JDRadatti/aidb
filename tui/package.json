@@ -1,0 +1,22 @@
+{
+	"name": "aidb-tui",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Pi-style terminal UI for the aidb debugger",
+	"type": "module",
+	"bin": {
+		"aidb": "./bin/aidb.js"
+	},
+	"scripts": {
+		"dev": "node --disable-warning=ExperimentalWarning src/main.ts",
+		"typecheck": "tsc --noEmit -p tsconfig.json"
+	},
+	"dependencies": {
+		"@earendil-works/pi-debugger-core": "*",
+		"@earendil-works/pi-tui": "^0.84.2"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3"
+	}
+}
