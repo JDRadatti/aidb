@@ -1,4 +1,15 @@
-import { Container, Editor, ProcessTerminal, Text, TuiMainScreen, matchesKey } from "@earendil-works/pi-tui";
+import {
+	CombinedAutocompleteProvider,
+	Container,
+	Editor,
+	KeybindingsManager,
+	ProcessTerminal,
+	Text,
+	TUI_KEYBINDINGS,
+	TuiMainScreen,
+	matchesKey,
+	setKeybindings,
+} from "@earendil-works/pi-tui";
 import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import { colors, createEditorTheme } from "./theme.ts";
@@ -6,6 +17,13 @@ import { handleReplInput, type ReplContext, type ReplIO } from "./repl.ts";
 
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
+
+setKeybindings(
+	new KeybindingsManager(TUI_KEYBINDINGS, {
+		"tui.editor.historyPrevious": ["ctrl+p"],
+		"tui.editor.historyNext": ["ctrl+n"],
+	}),
+);
 
 const transcript = new Container();
 const statusBar = new Text("", 0, 0);
@@ -20,6 +38,7 @@ const io: ReplIO = {
 	line: (text) => addLine(text),
 	info: (text) => addLine(colors.muted(text)),
 	success: (text) => addLine(colors.success(text)),
+	warning: (text) => addLine(colors.warning(text)),
 	error: (text) => addLine(colors.error(text)),
 };
 
@@ -32,6 +51,11 @@ function wireSession(api: DebuggerAPI): void {
 		if (category === "stderr") io.error(text);
 		else if (category === "console") io.info(text);
 		else io.line(text);
+	});
+
+	api.on("process", ({ name, systemProcessId }) => {
+		io.info(`Started ${name ?? "target"}${systemProcessId ? ` (pid ${systemProcessId})` : ""}`);
+		updateStatus();
 	});
 
 	api.on("stopped", ({ reason }) => {
@@ -47,7 +71,11 @@ function wireSession(api: DebuggerAPI): void {
 	});
 
 	api.on("session:exited", ({ exitCode }) => {
-		io.info(`Target exited (code ${exitCode}).`);
+		if (exitCode === 0 || exitCode === undefined) {
+			io.info("Program exited normally (code 0). Type run to start it again.");
+		} else {
+			io.error(`Program exited with code ${exitCode}. Type run to start it again.`);
+		}
 		updateStatus();
 	});
 }
@@ -102,12 +130,14 @@ async function submit(raw: string): Promise<void> {
 		tui.requestRender();
 		return;
 	}
+	editor.addToHistory(text);
 	addLine(colors.accent("› ") + text);
 	await handleReplInput(text, replCtx);
 	updateStatus();
 }
 
 const editor = new Editor(tui, createEditorTheme());
+editor.setAutocompleteProvider(new CombinedAutocompleteProvider(undefined, process.cwd()));
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
@@ -156,7 +186,7 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 });
 
 transcript.addChild(new Text(colors.bold("aidb — GDB via DAP")));
-transcript.addChild(new Text(colors.muted("Type /help for commands, or GDB commands directly.")));
+transcript.addChild(new Text(colors.muted("file <program> to load, break <file:line> to stop, run to start. /help for more.")));
 updateStatus();
 
 tui.start();
