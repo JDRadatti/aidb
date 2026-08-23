@@ -44,6 +44,14 @@ export class DapClient {
 	private requestTimeout = 10_000;
 	private capabilities: any = null;
 	private exitReported = false;
+	/**
+	 * True between sending launch/attach and the new run showing signs of life.
+	 * On relaunch GDB tears down the previous inferior, and those stale
+	 * exited/terminated events arrive *after* the new launch request. They must
+	 * be swallowed so they don't kill the fresh session's state.
+	 */
+	private startingRun = false;
+	private lastPid: number | undefined = undefined;
 
 	/**
 	 * Emit session:exited exactly once per GDB lifecycle.
@@ -51,7 +59,7 @@ export class DapClient {
 	 * and the process close handler fires again on shutdown.
 	 */
 	private reportExit(exitCode: number): void {
-		if (this.exitReported) return;
+		if (this.exitReported || this.startingRun) return;
 		this.exitReported = true;
 		this.eventBus.emit("session:exited", { exitCode });
 	}
@@ -184,6 +192,7 @@ export class DapClient {
 
 		switch (event) {
 			case "stopped": {
+				this.startingRun = false;
 				const stopData = {
 					reason: body.reason ?? "unknown",
 					threadId: body.threadId,
@@ -197,8 +206,29 @@ export class DapClient {
 			}
 
 			case "continued":
+				this.startingRun = false;
 				this.eventBus.emit("continued", { threadId: body.threadId });
 				this.eventBus.emit("session:running", { threadId: body.threadId });
+				break;
+
+			case "process": {
+				// GDB re-emits the previous run's process event (same pid) during a
+				// relaunch; only a genuinely new pid marks the new run as alive.
+				const pid = body.systemProcessId;
+				if (pid === undefined || pid !== this.lastPid) {
+					this.lastPid = pid;
+					this.startingRun = false;
+					this.eventBus.emit("process", {
+						name: body.name,
+						systemProcessId: pid,
+						startMethod: body.startMethod,
+					});
+				}
+				break;
+			}
+
+			case "thread":
+				this.startingRun = false;
 				break;
 
 			case "terminated":
@@ -217,14 +247,23 @@ export class DapClient {
 				});
 				break;
 
+			case "process":
+				this.eventBus.emit("process", {
+					name: body.name,
+					systemProcessId: body.systemProcessId,
+					startMethod: body.startMethod,
+				});
+				break;
+
 			case "breakpoint":
 				if (body.reason === "changed" || body.reason === "new") {
 					const bp = body.breakpoint;
 					if (bp?.id) {
-						this.eventBus.emit("breakpoint:hit", {
-							breakpointId: bp.id,
-							file: "",
-							line: 0,
+						this.eventBus.emit("breakpoint", {
+							id: bp.id,
+							verified: bp.verified ?? false,
+							line: bp.line,
+							file: bp.source?.path,
 						});
 					}
 				}
@@ -247,6 +286,11 @@ export class DapClient {
 			command,
 			arguments: args,
 		};
+
+		if (command === "launch" || command === "attach") {
+			this.startingRun = true;
+			this.exitReported = false;
+		}
 
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {

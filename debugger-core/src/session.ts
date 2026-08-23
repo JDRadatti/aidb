@@ -88,7 +88,9 @@ export class SessionStateMachine {
 		});
 
 		this.eventBus.on("session:stopped", () => {
-			if (this.state === "running" || this.state === "launching") {
+			// A stop event always means a live, halted target — trust it even if
+			// bookkeeping briefly said "exited" (e.g. during a relaunch race).
+			if (this.state !== "detached") {
 				this.setSilently("stopped");
 			}
 		});

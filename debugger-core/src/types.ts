@@ -66,8 +66,9 @@ export interface DebuggerEvents {
 	"session:exited": { exitCode: number };
 	"session:detached": {};
 	"session:error": { error: Error };
-	"breakpoint:hit": { breakpointId: number; file: string; line: number };
+	"breakpoint": { id: number; verified: boolean; line?: number; file?: string };
 	"output": { category: string; output: string };
+	"process": { name?: string; systemProcessId?: number; startMethod?: string };
 	"stopped": StopEventData;
 	"continued": { threadId?: number };
 	"terminated": {};
@@ -109,7 +110,7 @@ export interface DebuggerAPI {
 	// State
 	getState(): SessionState;
 	getStack(): Promise<StackFrame[]>;
-	getVariables(scope?: "local" | "global"): Promise<Variable[]>;
+	getVariables(scope?: "local" | "global" | "args"): Promise<Variable[]>;
 
 	// Raw GDB (escape hatch)
 	evaluate(expression: string, context?: string): Promise<any>;

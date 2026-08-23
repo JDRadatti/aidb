@@ -133,14 +133,74 @@ export function createDebuggerAPI(
 		}
 	});
 
-	eventBus.on("session:exited", () => {
+	/**
+	 * Begin a new run on the existing GDB process. GDB's DAP supports
+	 * repeated launch/attach requests, so `run` can restart the target
+	 * while keeping breakpoints — no client reset needed.
+	 */
+	function beginRun(): void {
+		const state = stateMachine.getState();
+		if (state === "not-started") {
+			stateMachine.transition("launching");
+		} else {
+			stateMachine.forceState?.("launching");
+		}
 		sourceFile = null;
 		currentLine = 0;
+		currentColumn = 0;
+		activeThreadId = 1;
+	}
+
+	/**
+	 * DAP's setBreakpoints replaces the full breakpoint list for a file,
+	 * so every mutation must send the complete desired list for that file
+	 * (sending just one line would silently delete the others).
+	 */
+	function desiredList(file: string): Array<{ line: number; condition?: string }> {
+		return Array.from(breakpoints.values())
+			.filter((bp) => bp.file === file)
+			.map((bp) => ({ line: bp.line, condition: bp.condition }));
+	}
+
+	async function syncFileBreakpoints(file: string, extra?: { line: number; condition?: string }): Promise<Breakpoint | undefined> {
+		await ensureStarted();
+		const existing = Array.from(breakpoints.values()).filter((bp) => bp.file === file);
+		const desired = [...desiredList(file), ...(extra ? [extra] : [])];
+		const result = await dapClient.sendRequest("setBreakpoints", {
+			source: { path: file },
+			breakpoints: desired,
+		});
+
+		for (const bp of existing) breakpoints.delete(bp.id);
+
+		const created: Breakpoint[] = [];
+		const responses = result.breakpoints ?? [];
+		responses.forEach((rb: any, i: number) => {
+			const nb: Breakpoint = {
+				id: rb?.id ?? i + 1,
+				file,
+				line: desired[i]?.line ?? rb?.line ?? 0,
+				condition: desired[i]?.condition,
+				verified: rb?.verified ?? false,
+			};
+			breakpoints.set(nb.id, nb);
+			created.push(nb);
+		});
+
+		if (extra) return created[created.length - 1];
+		return undefined;
+	}
+
+	eventBus.on("breakpoint", ({ id, verified }) => {
+		const bp = breakpoints.get(id);
+		if (bp && verified !== bp.verified) {
+			bp.verified = verified;
+		}
 	});
 
 	return {
 		async launch(program: string, args?: string[]) {
-			stateMachine.transition("launching");
+			beginRun();
 			await ensureStarted();
 			await dapClient.sendRequest("launch", {
 				program,
@@ -153,7 +213,7 @@ export function createDebuggerAPI(
 		},
 
 		async attach(pid: number) {
-			stateMachine.transition("launching");
+			beginRun();
 			await ensureStarted();
 			await dapClient.sendRequest("attach", { pid });
 			await dapClient.sendRequest("configurationDone");
@@ -190,33 +250,18 @@ export function createDebuggerAPI(
 		},
 
 		async setBreakpoint(file: string, line: number, condition?: string) {
-			await ensureStarted();
-			const result = await dapClient.sendRequest("setBreakpoints", {
-				source: { path: file },
-				breakpoints: [{ line, condition }],
-			});
-
-			const bp: Breakpoint = {
-				id: result.breakpoints?.[0]?.id ?? breakpoints.size + 1,
-				file,
-				line,
-				condition,
-				verified: result.breakpoints?.[0]?.verified ?? false,
-			};
-
-			breakpoints.set(bp.id, bp);
-			return bp;
+			const bp = await syncFileBreakpoints(file, { line, condition });
+			return bp!;
 		},
 
 		async removeBreakpoint(id: number) {
 			const bp = breakpoints.get(id);
-			if (bp) {
-				await dapClient.sendRequest("setBreakpoints", {
-					source: { path: bp.file },
-					breakpoints: [],
-				});
-				breakpoints.delete(id);
-			}
+			if (!bp) return;
+			breakpoints.delete(id);
+			await dapClient.sendRequest("setBreakpoints", {
+				source: { path: bp.file },
+				breakpoints: desiredList(bp.file),
+			});
 		},
 
 		async listBreakpoints() {
@@ -228,7 +273,14 @@ export function createDebuggerAPI(
 		},
 
 		async getStack() {
-			const result = await dapClient.sendRequest("stackTrace", { threadId: activeThreadId });
+			let result: any;
+			try {
+				result = await dapClient.sendRequest("stackTrace", { threadId: activeThreadId });
+			} catch {
+				// No live stack (e.g. target running, exited, or never started).
+				// GDB replies with raw internal errors here; don't leak them.
+				return [];
+			}
 			return (result.stackFrames ?? []).map((frame: any) => ({
 				id: frame.id,
 				name: frame.name,
@@ -238,7 +290,7 @@ export function createDebuggerAPI(
 			}));
 		},
 
-		async getVariables(scope?: "local" | "global") {
+		async getVariables(scope?: "local" | "global" | "args") {
 			const stack = await this.getStack();
 			if (stack.length === 0) return [];
 
@@ -249,7 +301,9 @@ export function createDebuggerAPI(
 			const scopes = scopesResult.scopes ?? [];
 			const targetScope = scope === "global"
 				? scopes.find((s: any) => /^global/i.test(s.name))
-				: scopes.find((s: any) => s.presentationHint === "locals") ?? scopes.find((s: any) => /^local/i.test(s.name));
+				: scope === "args"
+					? scopes.find((s: any) => s.presentationHint === "arguments") ?? scopes.find((s: any) => /^arg/i.test(s.name))
+					: scopes.find((s: any) => s.presentationHint === "locals") ?? scopes.find((s: any) => /^local/i.test(s.name));
 
 			if (!targetScope) return [];
 
@@ -267,10 +321,16 @@ export function createDebuggerAPI(
 
 		async evaluate(expression: string, context: string = "watch") {
 			await ensureStarted();
-			const stack = await this.getStack();
+			// Only pin to a frame while the target is stopped. Asking for a stack
+			// while running/exited makes GDB's DAP blow up with internal Python errors.
+			let frameId: number | undefined;
+			if (stateMachine.getState() === "stopped") {
+				const stack = await this.getStack();
+				frameId = stack[0]?.id;
+			}
 			const result = await dapClient.sendRequest("evaluate", {
 				expression,
-				frameId: stack[0]?.id,
+				frameId,
 				context,
 			});
 			return result.result;
