@@ -19,6 +19,8 @@ class FakeDapClient {
 
 	async start() {}
 
+	async prepareInferiorIo() {}
+
 	sendRequest(command: string, args?: any): Promise<any> {
 		this.requests.push({ command, args });
 		const responder = this.responders.get(command);

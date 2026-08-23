@@ -202,6 +202,9 @@ export function createDebuggerAPI(
 		async launch(program: string, args?: string[]) {
 			beginRun();
 			await ensureStarted();
+			// Install an exec-wrapper piping inferior stdout/stderr into a FIFO
+			// we drain ourselves: GDB's DAP drops/mangles program output.
+			await dapClient.prepareInferiorIo();
 			await dapClient.sendRequest("launch", {
 				program,
 				args: args ?? [],

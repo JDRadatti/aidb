@@ -3,7 +3,10 @@
  * Spawns gdb --interpreter=dap and communicates over stdio.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { DebuggerEventBus } from "./event-bus.ts";
 import type { DapClientConfig } from "./types.ts";
 
@@ -52,16 +55,129 @@ export class DapClient {
 	 */
 	private startingRun = false;
 	private lastPid: number | undefined = undefined;
+	/**
+	 * Inferior stdout/stderr capture: GDB 15's DAP forwards inferior output
+	 * only lazily (buffered until the next command is processed) and mangles
+	 * line boundaries. We redirect the inferior into a FIFO we drain instead,
+	 * and suppress GDB's delayed duplicate copies.
+	 */
+	private fifoDir: string | null = null;
+	private fifoFd: number | null = null;
+	private outTail = "";
+	private pumping = false;
+	/** Normalized lines recently delivered from the FIFO, for deduping GDB's
+	 * lazy console copies of the same output. */
+	private recentInferiorLines: string[] = [];
+	/**
+	 * With an exec-wrapper installed, every exec boundary makes GDB's DAP emit
+	 * exited/terminated for the pre-exec image even though the pid lives on.
+	 * Exit reporting is therefore debounced briefly and cancelled if the
+	 * inferior shows further signs of life.
+	 */
+	private pendingExitCode: number | null = null;
+	private pendingExitTimer: ReturnType<typeof setTimeout> | null = null;
 
 	/**
-	 * Emit session:exited exactly once per GDB lifecycle.
-	 * GDB sends both "exited" and "terminated" DAP events on target exit,
-	 * and the process close handler fires again on shutdown.
+	 * Emit session:exited once per GDB lifecycle, debounced to ride out
+	 * exec-boundary false alarms.
 	 */
-	private reportExit(exitCode: number): void {
-		if (this.exitReported || this.startingRun) return;
-		this.exitReported = true;
-		this.eventBus.emit("session:exited", { exitCode });
+	private scheduleExit(exitCode: number): void {
+		if (this.exitReported || this.startingRun || this.pendingExitTimer) return;
+		this.pendingExitCode = exitCode;
+		this.pendingExitTimer = setTimeout(() => {
+			this.pendingExitTimer = null;
+			if (this.exitReported || this.startingRun || this.pendingExitCode === null) return;
+			const code = this.pendingExitCode;
+			this.pendingExitCode = null;
+			this.exitReported = true;
+			// The final bytes may still be in flight through the FIFO; give the
+			// pump a moment to drain before emitting any unterminated tail.
+			setTimeout(() => {
+				if (!this.startingRun) this.flushInferiorTail();
+			}, 150);
+			this.eventBus.emit("session:exited", { exitCode: code });
+		}, 120);
+	}
+
+	/** Life sign: a debounced exit was a false alarm (exec boundary). */
+	private cancelPendingExit(): void {
+		if (this.pendingExitTimer) {
+			clearTimeout(this.pendingExitTimer);
+			this.pendingExitTimer = null;
+			this.pendingExitCode = null;
+		}
+	}
+
+	/**
+	 * Set up inferior output capture.
+	 *
+	 * GDB 15's DAP neither forwards inferior output reliably nor preserves a
+	 * final unterminated line, and pointing `inferior-tty` at a FIFO makes GDB
+	 * consume bytes behind our back. Instead we install an exec-wrapper that
+	 * redirects the inferior's stdout/stderr into a FIFO only we read:
+	 *   set exec-wrapper /bin/sh -c 'exec "$@" >FIFO 2>&1' sh
+	 * GDB appends the real program and its args after "sh", keeping symbols,
+	 * breakpoints and argv untouched.
+	 */
+	async prepareInferiorIo(): Promise<void> {
+		if (this.fifoFd !== null) return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aidb-io-"));
+		const fifo = path.join(dir, "inferior.out");
+		execFileSync("mkfifo", [fifo]);
+		this.fifoDir = dir;
+		this.fifoFd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+		await this.sendRequest("evaluate", {
+			expression: `set exec-wrapper /bin/sh -c 'exec "$@" >${fifo} 2>&1' sh`,
+			context: "repl",
+		});
+		void this.pumpInferiorOutput();
+	}
+
+	private async pumpInferiorOutput(): Promise<void> {
+		if (this.pumping) return;
+		this.pumping = true;
+		const chunk = Buffer.alloc(4096);
+		while (this.fifoFd !== null) {
+			let n = 0;
+			try {
+				n = fs.readSync(this.fifoFd, chunk, 0, chunk.length, null);
+			} catch (error: any) {
+				if (error?.code === "EAGAIN") {
+					await new Promise((r) => setTimeout(r, 25));
+					continue;
+				}
+				break;
+			}
+			if (n > 0) {
+				this.outTail += chunk.toString("utf8", 0, n);
+				let idx: number;
+				while ((idx = this.outTail.indexOf("\n")) !== -1) {
+					const line = this.outTail.slice(0, idx + 1);
+					this.outTail = this.outTail.slice(idx + 1);
+					this.recordInferiorLine(line);
+					this.eventBus.emit("output", { category: "stdout", output: line });
+				}
+				continue;
+			}
+			// FIFO has no EOF while we hold the write end; just idle.
+			await new Promise((r) => setTimeout(r, 50));
+		}
+		this.pumping = false;
+	}
+
+	private flushInferiorTail(): void {
+		if (!this.outTail) return;
+		const tail = this.outTail.endsWith("\n") ? this.outTail : this.outTail + "\n";
+		this.outTail = "";
+		this.recordInferiorLine(tail);
+		this.eventBus.emit("output", { category: "stdout", output: tail });
+	}
+
+	private recordInferiorLine(line: string): void {
+		const trimmed = line.trim();
+		if (!trimmed) return;
+		this.recentInferiorLines.push(trimmed);
+		if (this.recentInferiorLines.length > 64) this.recentInferiorLines.shift();
 	}
 
 	constructor(eventBus: DebuggerEventBus, config: DapClientConfig = {}) {
@@ -89,7 +205,10 @@ export class DapClient {
 		});
 
 		this.process.on("exit", (code) => {
-			this.reportExit(code ?? 0);
+			// GDB itself died — no debouncing, the session is definitively over.
+			this.cancelPendingExit();
+			this.exitReported = true;
+			this.eventBus.emit("session:exited", { exitCode: code ?? 0 });
 			this.rejectAllPending(new Error("GDB exited"));
 		});
 
@@ -193,6 +312,7 @@ export class DapClient {
 		switch (event) {
 			case "stopped": {
 				this.startingRun = false;
+				this.cancelPendingExit();
 				const stopData = {
 					reason: body.reason ?? "unknown",
 					threadId: body.threadId,
@@ -207,6 +327,7 @@ export class DapClient {
 
 			case "continued":
 				this.startingRun = false;
+				this.cancelPendingExit();
 				this.eventBus.emit("continued", { threadId: body.threadId });
 				this.eventBus.emit("session:running", { threadId: body.threadId });
 				break;
@@ -218,6 +339,7 @@ export class DapClient {
 				if (pid === undefined || pid !== this.lastPid) {
 					this.lastPid = pid;
 					this.startingRun = false;
+					this.cancelPendingExit();
 					this.eventBus.emit("process", {
 						name: body.name,
 						systemProcessId: pid,
@@ -228,32 +350,42 @@ export class DapClient {
 			}
 
 			case "thread":
-				this.startingRun = false;
+				if (body.reason === "started") {
+					this.startingRun = false;
+					this.cancelPendingExit();
+				}
 				break;
 
 			case "terminated":
 				this.eventBus.emit("terminated", {});
-				this.reportExit(0);
+				this.scheduleExit(0);
 				break;
 
 			case "exited":
-				this.reportExit(body.exitCode ?? 0);
+				this.scheduleExit(body.exitCode ?? 0);
 				break;
 
-			case "output":
+			case "output": {
+				const output = body.output ?? "";
+				// GDB lazily re-forwards inferior output it siphoned from our
+				// FIFO whenever it processes the next command. Drop those
+				// delayed duplicates; the pump already delivered the real thing.
+				if (
+					(body.category ?? "console") === "stdout" &&
+					output
+						.split("\n")
+						.filter((l: string) => l.trim())
+						.every((l: string) => this.recentInferiorLines.includes(l.trim()) && l.trim().length > 0) &&
+					output.trim().length > 0
+				) {
+					break;
+				}
 				this.eventBus.emit("output", {
 					category: body.category ?? "console",
-					output: body.output ?? "",
+					output,
 				});
 				break;
-
-			case "process":
-				this.eventBus.emit("process", {
-					name: body.name,
-					systemProcessId: body.systemProcessId,
-					startMethod: body.startMethod,
-				});
-				break;
+			}
 
 			case "breakpoint":
 				if (body.reason === "changed" || body.reason === "new") {
@@ -337,6 +469,20 @@ export class DapClient {
 
 			this.process.kill();
 			this.process = null;
+		}
+
+		this.flushInferiorTail();
+		if (this.fifoFd !== null) {
+			try {
+				fs.closeSync(this.fifoFd);
+			} catch {
+				// Already closed
+			}
+			this.fifoFd = null;
+		}
+		if (this.fifoDir) {
+			fs.rmSync(this.fifoDir, { recursive: true, force: true });
+			this.fifoDir = null;
 		}
 
 		this.rejectAllPending(new Error("Client stopped"));
