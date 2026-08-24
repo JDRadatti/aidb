@@ -88,6 +88,35 @@ describe("WindowManager", () => {
 		assert.equal(wm.cycle(), "repl");
 	});
 
+	it("splits can name panes; digit-only names are reserved", () => {
+		const wm = makeManager("repl");
+		assert.match(wm.split("v", 0, "3").error!, /reserved/);
+		assert.ok(wm.split("v", 0, "mem").ok);
+		assert.deepEqual(wm.list().map((p) => p.id), ["repl", "mem"]);
+	});
+
+	it("switchTo and close accept a name as well as an index", () => {
+		const wm = makeManager("repl");
+		wm.split("v", 0, "mem");
+		assert.ok(wm.switchTo("mem"));
+		assert.equal(wm.active, "mem");
+		assert.equal(wm.resolve("nope"), undefined);
+		assert.match(wm.close("nope").error!, /named 'nope'/);
+		assert.ok(wm.close("mem").ok);
+		assert.deepEqual(wm.list().map((p) => p.id), ["repl"]);
+		assert.equal(wm.active, "repl"); // closing the active pane falls back
+	});
+
+	it("mount swaps an existing pane's content in place", () => {
+		const wm = makeManager("repl");
+		assert.ok(wm.split("v").ok); // pane2 is a blank slab
+		assert.ok(wm.mount("pane2", stubPane("W")));
+		assert.match(wm.mount("ghost", stubPane("W")).error!, /ghost/);
+		const lines = wm.render(40).map(strip);
+		assert.ok(lines.some((l) => l.includes("WW")), "expected mounted content");
+		assert.ok(!lines.some((l) => l.includes("█")), "expected the slab to be gone");
+	});
+
 	it("blank panes render as index slabs with big digits", () => {
 		const wm = makeManager("repl");
 		assert.ok(wm.split("v").ok);

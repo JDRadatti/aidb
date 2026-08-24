@@ -129,6 +129,9 @@ export class WindowManager implements Component {
 	 * was pre-registered under that id; otherwise a fresh blank slab is made.
 	 */
 	split(dir: SplitDir, targetIdx?: number, newPaneId?: PaneId): SplitResult<PaneId> {
+		if (newPaneId && /^\d+$/.test(newPaneId)) {
+			return { ok: false, error: "numeric pane names are reserved for indices" };
+		}
 		const panes = this.tree.panes();
 		const resolved = targetIdx ?? panes.indexOf(this.tree.active);
 		const target = panes[resolved];
@@ -146,10 +149,12 @@ export class WindowManager implements Component {
 		return { ok: true, value: id };
 	}
 
-	/** Close the pane at `idx`. The repl pane refuses. */
-	close(idx: number): SplitResult<null> {
-		const id = this.tree.panes()[idx];
-		if (!id) return { ok: false, error: `no pane at index ${idx} (/win list shows indices)` };
+	/**
+	 * Close a pane addressed by index or name. The repl pane refuses.
+	 */
+	close(ref: number | string): SplitResult<null> {
+		const id = this.resolve(ref);
+		if (!id) return { ok: false, error: this.unresolvedMessage(ref) };
 		if (id === "repl") return { ok: false, error: "the repl pane cannot be closed" };
 		const result = this.tree.close(id);
 		if (!result.ok) return result;
@@ -158,13 +163,36 @@ export class WindowManager implements Component {
 		return result;
 	}
 
-	/** Make the pane at `idx` active (default split target). */
-	switchTo(idx: number): boolean {
-		const id = this.tree.panes()[idx];
+	/** Swap the content of an existing pane (e.g. turn a blank slab into a live view). */
+	mount(id: PaneId, component: Component): SplitResult<null> {
+		if (!this.resolve(id)) {
+			return { ok: false, error: `no pane named '${id}' (/win list shows panes)` };
+		}
+		this.register(id, component);
+		return { ok: true, value: null };
+	}
+
+	/**
+	 * Make the given pane active (default split target). Panes are addressed
+	 * by index, digit string, or name.
+	 */
+	switchTo(ref: number | string): boolean {
+		const id = this.resolve(ref);
 		if (!id) return false;
 		this.tree.setActive(id);
 		this.changed();
 		return true;
+	}
+
+	/**
+	 * Resolve an address to a pane id: a number or digit string is an index
+	 * into `tree.panes()` order; anything else matches an id (or title).
+	 */
+	resolve(ref: number | string): PaneId | undefined {
+		const panes = this.tree.panes();
+		if (typeof ref === "number") return panes[ref];
+		if (/^\d+$/.test(ref)) return panes[Number.parseInt(ref, 10)];
+		return panes.find((id) => id === ref || this.titleOf(id) === ref);
 	}
 
 	/** Cycle active to the next pane in index order. */
@@ -197,6 +225,12 @@ export class WindowManager implements Component {
 	private titleOf(id: PaneId): string {
 		const component = this.deps.panes.get(id);
 		return component instanceof View ? component.title || id : id;
+	}
+
+	private unresolvedMessage(ref: number | string): string {
+		return typeof ref === "number" || /^\d+$/.test(ref)
+			? `no pane at index ${ref} (/win list shows indices)`
+			: `no pane named '${ref}'`;
 	}
 
 	/**
