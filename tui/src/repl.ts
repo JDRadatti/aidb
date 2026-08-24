@@ -36,8 +36,8 @@ const HELP = [
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  info locals | info args     variables and arguments of the current frame",
 	"",
-	"Windows (manual, pane indices): /win vsplit [idx] | hsplit [idx] | close <idx> | next | list;",
-	"  /switch <idx> focuses a pane. Blank panes show their index. See: help win.",
+	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | next | list;",
+	"  /switch <idx|name> focuses a pane. Blank panes show their index. See: help win.",
 	"",
 	"Anything else is passed to GDB verbatim: info registers, x/4xw, disassemble, pwd, ...",
 	"Relative paths resolve against the directory aidb was started in; Tab completes file paths.",
@@ -53,16 +53,20 @@ const WIN_HELP = [
 	"  index as a giant numeral and its own background color; titles read",
 	"  'idx name' with * marking the active pane (the default split target).",
 	"",
-	"  /win vsplit [idx]     split a pane into columns (default: active pane);",
-	"                        the new pane appears to the right",
-	"  /win hsplit [idx]     split a pane into rows; new pane appears below",
-	"  /win close <idx>      close that pane (the repl refuses)",
-	"  /win next             make the next pane active",
-	"  /switch <idx>         make that pane active",
-	"  /win list             print idx -> id mapping (indices shift on close!)",
+	"  /win vsplit [idx] [name]                    split a pane into columns",
+	"                                              (default: active pane); the new",
+	"                                              pane appears to the right",
+	"  /win hsplit [idx] [name]                    split a pane into rows; new pane",
+	"                                              appears below",
+	"  /win close <idx|name>                       close that pane (the repl refuses)",
+	"  /win next                                   make the next pane active",
+	"  /switch <idx|name>                          make that pane active",
+	"  /win list                                   print idx -> id mapping (indices",
+	"                                              shift on close!)",
 	"",
 	"Notes:",
-	"  - Indices are positions in /win list order, not permanent ids.",
+	"  - Indices are positions in /win list order, not permanent ids. Name panes",
+	"    on creation (/win vsplit 0 mem) and address them by name instead.",
 	"  - Max 3 columns x 3 rows; splits beyond that are rejected.",
 	"  - Planned: tmux-style leader keys (e.g. Ctrl+a then key) once the",
 	"    mechanics here are proven — see windows-plan.html.",
@@ -406,39 +410,39 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 
 /**
  * `/win` — pane management, all explicit: splits act on the pane at the given
- * index (default: active), closes and switches require an index.
+ * index (default: active), closes and switches take an index or a name.
  */
 async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 	const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
 	const windows = ctx.windows;
 	const io = ctx.io;
-	const parseIdx = (raw: string | undefined): number | undefined | "invalid" => {
-		if (raw === undefined) return undefined;
-		const n = Number.parseInt(raw, 10);
-		return Number.isNaN(n) ? "invalid" : n;
-	};
 	switch (sub) {
 		case "vsplit":
 		case "hsplit": {
-			const dir: SplitDir = sub === "vsplit" ? "v" : "h";
-			const idx = parseIdx(rest[0]);
-			if (idx === "invalid") {
-				io.error(`Usage: /win ${sub} [paneIndex]`);
-				return;
+			// Accept "[idx] [name]" in either order; extra words are a typo.
+			let idx: number | undefined;
+			let name: string | undefined;
+			for (const word of rest) {
+				if (idx === undefined && /^\d+$/.test(word)) idx = Number.parseInt(word, 10);
+				else if (name === undefined) name = word;
+				else {
+					io.error(`Usage: /win ${sub} [idx] [name]`);
+					return;
+				}
 			}
-			const result = windows.split(dir, idx);
+			const dir: SplitDir = sub === "vsplit" ? "v" : "h";
+			const result = windows.split(dir, idx, name);
 			if (result.ok) io.success(`Created '${result.value}' — /win list shows indices.`);
 			else io.error(result.error);
 			return;
 		}
 		case "close": {
-			const idx = parseIdx(rest[0]);
-			if (typeof idx !== "number") {
-				io.error("Usage: /win close <paneIndex>");
+			if (rest[0] === undefined || rest.length > 1) {
+				io.error("Usage: /win close <idx|name>");
 				return;
 			}
-			const result = windows.close(idx);
-			if (result.ok) io.info(`Closed index ${idx} — now: ${windows.list().map((p) => p.id).join(", ")}`);
+			const result = windows.close(rest[0]);
+			if (result.ok) io.info(`Closed '${rest[0]}' — now: ${windows.list().map((p) => p.id).join(", ")}`);
 			else io.error(result.error);
 			return;
 		}
@@ -453,7 +457,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			return;
 		}
 		default:
-			io.error(`Usage: /win vsplit|hsplit [idx] | close <idx> | next | list — 'help win' for details.`);
+			io.error(`Usage: /win vsplit|hsplit [idx] [name] | close <idx|name> | next | list — 'help win' for details.`);
 	}
 }
 
@@ -546,13 +550,13 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 		}
 
 		case "switch": {
-			const idx = Number.parseInt(rest[0] ?? "", 10);
-			if (Number.isNaN(idx)) {
-				io.error("Usage: /switch <paneIndex> — /win list shows indices");
+			const ref = rest[0];
+			if (ref === undefined || rest.length > 1) {
+				io.error("Usage: /switch <idx|name> — /win list shows indices");
 				return;
 			}
-			if (!ctx.windows.switchTo(idx)) {
-				io.error(`No pane at index ${idx}. /win list shows indices.`);
+			if (!ctx.windows.switchTo(ref)) {
+				io.error(/^\d+$/.test(ref) ? `No pane at index ${ref}. /win list shows indices.` : `No pane named '${ref}'.`);
 				return;
 			}
 			io.info(`Active pane: ${ctx.windows.active}`);

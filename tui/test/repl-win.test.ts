@@ -75,4 +75,23 @@ describe("window commands", () => {
 		await handleReplInput("/win next", ctx);
 		assert.equal(windows.active, "repl");
 	});
+
+	it("/win splits can name panes; /switch resolves names", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("/win vsplit mem", ctx);
+		assert.deepEqual(windows.list().map((p) => p.id), ["repl", "mem"]);
+		await handleReplInput("/switch mem", ctx);
+		assert.equal(windows.active, "mem");
+		await handleReplInput("/switch nope", ctx);
+		assert.match(lastMessage(messages), /No pane named 'nope'/);
+	});
+
+	it("/win close takes a name; digit-only names are rejected at split time", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("/win vsplit 0 3", ctx);
+		assert.match(lastMessage(messages), /reserved/);
+		await handleReplInput("/win vsplit 0 mem", ctx);
+		await handleReplInput("/win close mem", ctx);
+		assert.deepEqual(windows.list().map((p) => p.id), ["repl"]);
+	});
 });
