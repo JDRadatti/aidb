@@ -164,10 +164,8 @@ editor.onSubmit = (text: string) => {
 };
 // The suggestion list renders as an overlay docked above the prompt instead
 // of inline rows, so opening/closing it never scrolls the document or leaves
-// a gap at the bottom of the screen.
-attachDropdownOverlay(tui, editor, {
-	rowsBelow: () => statusBar.render(terminal.columns).length,
-});
+// a gap at the bottom of the screen. It floats over the status bar.
+attachDropdownOverlay(tui, editor);
 
 tui.addChild(windows);
 tui.addChild(statusBar);

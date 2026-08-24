@@ -147,6 +147,17 @@ describe("attachDropdownOverlay", () => {
 		editor.render(WIDTH); // in a real frame the editor renders before the overlay composites
 		assert.deepEqual(entry.component.render(WIDTH), []);
 	});
+
+	it("docks directly on the editor by default (covering what sits above it)", async () => {
+		const { tui, entries } = stubTui();
+		const editor = new AidbEditor(tui, createEditorTheme());
+		attachDropdownOverlay(tui, editor);
+		const entry = entries[0];
+
+		await activateAndRender(editor, { tui });
+		entry.component.render(WIDTH);
+		assert.equal(entry.options.offsetY, -editor.lastHeight);
+	});
 });
 
 describe("TuiMainScreen integration", () => {
