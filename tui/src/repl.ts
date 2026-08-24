@@ -130,14 +130,28 @@ export function nextWatchId(windows: WindowManager): string {
 	}
 }
 
-/** Find an existing live watch pane by id, or undefined. */
-export function findWatchView(windows: WindowManager): { id: string; view: WatchListView } | undefined {
+/** All live watch panes currently mounted. */
+export function findWatchViews(windows: WindowManager): Array<{ id: string; view: WatchListView }> {
+	const found: Array<{ id: string; view: WatchListView }> = [];
 	for (const pane of windows.list()) {
 		if (!pane.id.startsWith("watch")) continue;
 		const view = windows.component(pane.id);
-		if (view instanceof WatchListView) return { id: pane.id, view };
+		if (view instanceof WatchListView) found.push({ id: pane.id, view });
 	}
-	return undefined;
+	return found;
+}
+
+/** Find an existing live watch pane by id, or undefined. */
+export function findWatchView(windows: WindowManager): { id: string; view: WatchListView } | undefined {
+	return findWatchViews(windows)[0];
+}
+
+/**
+ * Re-evaluate every expression in every watch pane. Called whenever the
+ * target stops — the equivalent of gdb refreshing `display` expressions.
+ */
+export function refreshWatchPanes(ctx: ReplContext): void {
+	for (const { view } of findWatchViews(ctx.windows)) void view.refreshAll();
 }
 
 function requireStopped(api: DebuggerAPI, io: ReplIO): boolean {

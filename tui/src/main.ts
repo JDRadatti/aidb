@@ -14,7 +14,7 @@ import {
 import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import { colors, createEditorTheme } from "./theme.ts";
-import { handleReplInput, type ReplContext, type ReplIO } from "./repl.ts";
+import { handleReplInput, refreshWatchPanes, type ReplContext, type ReplIO } from "./repl.ts";
 import { SplitTree } from "./split-tree.ts";
 import { WindowManager } from "./window-manager.ts";
 
@@ -77,6 +77,8 @@ function wireSession(api: DebuggerAPI): void {
 	api.on("stopped", ({ reason }) => {
 		io.info(`Stopped (${reason}).`);
 		updateStatus();
+		// Watches re-evaluate on every stop, like gdb's `display`.
+		refreshWatchPanes(replCtx);
 	});
 
 	api.on("continued", () => updateStatus());

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Component } from "@earendil-works/pi-tui";
-import { handleReplInput, type ReplContext, type ReplIO } from "../src/repl.ts";
+import { handleReplInput, refreshWatchPanes, type ReplContext, type ReplIO } from "../src/repl.ts";
 import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
 import { WatchListView } from "../src/views/watch.ts";
@@ -127,5 +127,27 @@ describe("window commands", () => {
 		assert.deepEqual(windows.list().map((p) => p.id), ["repl", "watch"]);
 		const view = windows.component("watch") as WatchListView;
 		assert.deepEqual(view.getEntries().map((e) => e.expr), ["i", "sum"]);
+	});
+
+	it("refreshWatchPanes re-evaluates on stops, across all watch panes", async () => {
+		const values: Record<string, string> = { i: "1", n: "1" };
+		const { ctx, windows } = makeContext({
+			evaluate: async (expr: string) => `${expr}=${values[expr]}`,
+		});
+		await handleReplInput("/win hsplit 0 watch", ctx);
+		await handleReplInput("/watch i", ctx); // evaluates to i=1
+		await handleReplInput("/win vsplit 0 watch2", ctx);
+		// /watch targets the first pane; add to watch2 directly.
+		(windows.component("watch2") as WatchListView).add("n");
+		await new Promise((r) => setTimeout(r, 0));
+
+		values.i = "2";
+		values.n = "2";
+		refreshWatchPanes(ctx); // a "stopped" event fired
+		await new Promise((r) => setTimeout(r, 0));
+		const first = windows.component("watch") as WatchListView;
+		const second = windows.component("watch2") as WatchListView;
+		assert.equal(first.getEntries()[0].value, "i=2"); // was i=1
+		assert.equal(second.getEntries()[0].value, "n=2");
 	});
 });
