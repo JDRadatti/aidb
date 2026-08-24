@@ -1,7 +1,6 @@
 import {
 	CombinedAutocompleteProvider,
 	Container,
-	Editor,
 	KeybindingsManager,
 	ProcessTerminal,
 	Text,
@@ -13,6 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
+import { AidbEditor, attachDropdownOverlay } from "./completion-overlay.ts";
 import { colors, createEditorTheme } from "./theme.ts";
 import { handleReplInput, refreshWatchPanes, type ReplContext, type ReplIO } from "./repl.ts";
 import { SplitTree } from "./split-tree.ts";
@@ -157,11 +157,17 @@ async function submit(raw: string): Promise<void> {
 	updateStatus();
 }
 
-const editor = new Editor(tui, createEditorTheme());
+const editor = new AidbEditor(tui, createEditorTheme());
 editor.setAutocompleteProvider(new CombinedAutocompleteProvider(undefined, process.cwd()));
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
+// The suggestion list renders as an overlay docked above the prompt instead
+// of inline rows, so opening/closing it never scrolls the document or leaves
+// a gap at the bottom of the screen.
+attachDropdownOverlay(tui, editor, {
+	rowsBelow: () => statusBar.render(terminal.columns).length,
+});
 
 tui.addChild(windows);
 tui.addChild(statusBar);
