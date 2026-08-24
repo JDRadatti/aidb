@@ -21,8 +21,12 @@ export const MIN_PANE_WIDTH = 10;
 export const MIN_PANE_HEIGHT = 3;
 const TITLE_ROWS = 1;
 
-/** Rows of screen chrome (status bar, editor) subtracted from terminal rows. */
-const CHROME_ROWS_ESTIMATE = 3;
+/**
+ * Rows of screen chrome below the panes: status bar (1) + editor (top
+ * border, input line, bottom border). Undercounting makes the document one
+ * row taller than the terminal, which scrolls the pane titles offscreen.
+ */
+const CHROME_ROWS_ESTIMATE = 4;
 
 export interface WindowManagerDeps {
 	/** Panes by id; unregistered ids render as an IndexSlab placeholder. */

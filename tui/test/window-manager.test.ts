@@ -24,10 +24,10 @@ describe("WindowManager", () => {
 	it("renders a single pane with a title row plus content", () => {
 		const wm = makeManager("repl");
 		const lines = wm.render(20);
-		assert.equal(lines.length, 7); // title + body padded to the allotted rows
+		assert.equal(lines.length, 6); // title + body clipped/padded to the allotted rows
 		assert.ok(strip(lines[0]).includes("repl"));
 		assert.ok(strip(lines[1]).startsWith("R"));
-		assert.ok(strip(lines[6]).trimEnd() === "" || strip(lines[6]).startsWith("R"));
+		assert.ok(strip(lines[5]).trimEnd() === "" || strip(lines[5]).startsWith("R"));
 	});
 
 	it("vsplit gives equal columns regardless of pane content", () => {
@@ -133,6 +133,17 @@ describe("WindowManager", () => {
 		assert.equal(lines.length, 6); // 2 titles + 2x2 clipped body rows
 		assert.ok(lines[1].startsWith("R"));
 		assert.ok(lines[5].startsWith("B"));
+	});
+
+	it("the window block fits in the rows left after screen chrome", () => {
+		// getViewRows=10, CHROME_ROWS_ESTIMATE=4 -> 6 rows for panes. One row
+		// over and flow-mode scrolling hides the title row off the top.
+		const wm = makeManager("repl");
+		assert.equal(wm.render(80).length, 6);
+		assert.ok(wm.split("v").ok);
+		assert.equal(wm.render(80).length, 6);
+		assert.ok(wm.split("h", 1).ok);
+		assert.ok(wm.render(80).length <= 6);
 	});
 
 	it("an oversized transcript is clipped to the pane height, keeping the tail", () => {
