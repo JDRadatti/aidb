@@ -9,11 +9,14 @@ import {
 	TuiMainScreen,
 	matchesKey,
 	setKeybindings,
+	type Component,
 } from "@earendil-works/pi-tui";
 import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import { colors, createEditorTheme } from "./theme.ts";
 import { handleReplInput, type ReplContext, type ReplIO } from "./repl.ts";
+import { SplitTree } from "./split-tree.ts";
+import { WindowManager } from "./window-manager.ts";
 
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
@@ -27,6 +30,19 @@ setKeybindings(
 
 const transcript = new Container();
 const statusBar = new Text("", 0, 0);
+
+/**
+ * The window system is being proven in isolation: blank panes render as
+ * colored index slabs (see windows-plan.html). Real views register here once
+ * the mechanics are trusted.
+ */
+const panesById = new Map<string, Component>();
+panesById.set("repl", transcript);
+const windows = new WindowManager(new SplitTree("repl"), {
+	panes: panesById,
+	getViewRows: () => terminal.rows,
+	onChange: () => tui.requestRender(),
+});
 
 function addLine(text: string): void {
 	if (!text) return;
@@ -90,8 +106,9 @@ function updateStatus(): void {
 		state === "running" ? colors.success("●") :
 		colors.muted("○");
 	const location = api.sourceFile ? `${api.sourceFile}:${api.currentLine}` : "—";
+	const panes = windows.list().map((p) => `${p.idx}${p.active ? "*" : ""}·${p.id}`).join(" ");
 	statusBar.setText(
-		`${dot} ${state} │ bp: ${api.breakpoints.size} │ thread: ${api.activeThreadId} │ ${location}`,
+		`${dot} ${state} │ ${panes} │ bp: ${api.breakpoints.size} │ ${location}`,
 	);
 	tui.requestRender();
 }
@@ -121,6 +138,7 @@ const replCtx: ReplContext = {
 	reset: resetDebugger,
 	requestExit: () => void shutdown(),
 	io,
+	windows,
 };
 
 async function submit(raw: string): Promise<void> {
@@ -141,9 +159,16 @@ editor.setAutocompleteProvider(new CombinedAutocompleteProvider(undefined, proce
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
-tui.addChild(transcript);
+
+tui.addChild(windows);
 tui.addChild(statusBar);
 tui.addChild(editor);
+
+/**
+ * The editor keeps focus permanently — panes never capture keys, so the
+ * prompt works no matter what the window layout looks like. Window commands
+ * (/switch, /win ...) are typed like everything else.
+ */
 tui.setFocus(editor);
 
 tui.addInputListener((data): { consume: boolean } | undefined => {

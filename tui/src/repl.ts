@@ -1,6 +1,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
+import type { WindowManager } from "./window-manager.ts";
+import type { SplitDir } from "./split-tree.ts";
 
 export interface ReplIO {
 	line(text: string): void;
@@ -15,6 +17,7 @@ export interface ReplContext {
 	reset(): Promise<DebuggerAPI>;
 	requestExit(): void;
 	io: ReplIO;
+	windows: WindowManager;
 }
 
 const HELP = [
@@ -33,12 +36,51 @@ const HELP = [
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  info locals | info args     variables and arguments of the current frame",
 	"",
+	"Windows (manual, pane indices): /win vsplit [idx] | hsplit [idx] | close <idx> | next | list;",
+	"  /switch <idx> focuses a pane. Blank panes show their index. See: help win.",
+	"",
 	"Anything else is passed to GDB verbatim: info registers, x/4xw, disassemble, pwd, ...",
 	"Relative paths resolve against the directory aidb was started in; Tab completes file paths.",
 	"",
 	"Slash aliases still work: /launch /attach /break /breaks /remove /stack /locals /status /help /quit",
-	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt.",
+	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Topic help: help <topic> (e.g. help win).",
 ].join("\n");
+
+const WIN_HELP = [
+	"Windows — panes addressed by index, driven entirely from the prompt:",
+	"",
+	"  The prompt always works; panes never capture keys. Every pane shows its",
+	"  index as a giant numeral and its own background color; titles read",
+	"  'idx name' with * marking the active pane (the default split target).",
+	"",
+	"  /win vsplit [idx]     split a pane into columns (default: active pane);",
+	"                        the new pane appears to the right",
+	"  /win hsplit [idx]     split a pane into rows; new pane appears below",
+	"  /win close <idx>      close that pane (the repl refuses)",
+	"  /win next             make the next pane active",
+	"  /switch <idx>         make that pane active",
+	"  /win list             print idx -> id mapping (indices shift on close!)",
+	"",
+	"Notes:",
+	"  - Indices are positions in /win list order, not permanent ids.",
+	"  - Max 3 columns x 3 rows; splits beyond that are rejected.",
+	"  - Planned: tmux-style leader keys (e.g. Ctrl+a then key) once the",
+	"    mechanics here are proven — see windows-plan.html.",
+].join("\n");
+
+/**
+ * `help` prints the general sheet; `help <topic>` digs into one area.
+ */
+function showHelp(topic: string | undefined, io: ReplIO): void {
+	const normalized = topic?.trim().toLowerCase();
+	if (normalized === "win" || normalized === "window" || normalized === "windows") {
+		io.line(WIN_HELP);
+	} else if (normalized) {
+		io.error(`No help topic '${topic}'. Topics: win`);
+	} else {
+		io.line(HELP);
+	}
+}
 
 /**
  * Last program launched, so bare `run` can restart it.
@@ -348,7 +390,7 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 			break;
 
 		case "help":
-			io.line(HELP);
+			showHelp(args, io);
 			break;
 
 		case "status":
@@ -362,6 +404,59 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 	}
 }
 
+/**
+ * `/win` — pane management, all explicit: splits act on the pane at the given
+ * index (default: active), closes and switches require an index.
+ */
+async function handleWin(args: string, ctx: ReplContext): Promise<void> {
+	const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
+	const windows = ctx.windows;
+	const io = ctx.io;
+	const parseIdx = (raw: string | undefined): number | undefined | "invalid" => {
+		if (raw === undefined) return undefined;
+		const n = Number.parseInt(raw, 10);
+		return Number.isNaN(n) ? "invalid" : n;
+	};
+	switch (sub) {
+		case "vsplit":
+		case "hsplit": {
+			const dir: SplitDir = sub === "vsplit" ? "v" : "h";
+			const idx = parseIdx(rest[0]);
+			if (idx === "invalid") {
+				io.error(`Usage: /win ${sub} [paneIndex]`);
+				return;
+			}
+			const result = windows.split(dir, idx);
+			if (result.ok) io.success(`Created '${result.value}' — /win list shows indices.`);
+			else io.error(result.error);
+			return;
+		}
+		case "close": {
+			const idx = parseIdx(rest[0]);
+			if (typeof idx !== "number") {
+				io.error("Usage: /win close <paneIndex>");
+				return;
+			}
+			const result = windows.close(idx);
+			if (result.ok) io.info(`Closed index ${idx} — now: ${windows.list().map((p) => p.id).join(", ")}`);
+			else io.error(result.error);
+			return;
+		}
+		case "next": {
+			io.info(`Active pane: ${windows.cycle()}`);
+			return;
+		}
+		case "list": {
+			for (const pane of windows.list()) {
+				io.line(`${pane.idx}\t${pane.id}${pane.active ? " *" : ""}`);
+			}
+			return;
+		}
+		default:
+			io.error(`Usage: /win vsplit|hsplit [idx] | close <idx> | next | list — 'help win' for details.`);
+	}
+}
+
 async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void> {
 	const words = input.slice(1).split(/\s+/);
 	const command = words[0] ?? "";
@@ -372,7 +467,7 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 
 	switch (command) {
 		case "help":
-			io.line(HELP);
+			showHelp(args, io);
 			break;
 
 		case "run":
@@ -449,6 +544,24 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			io.line(`state: ${state} | breakpoints: ${api.breakpoints.size} | thread: ${api.activeThreadId} | ${location}`);
 			break;
 		}
+
+		case "switch": {
+			const idx = Number.parseInt(rest[0] ?? "", 10);
+			if (Number.isNaN(idx)) {
+				io.error("Usage: /switch <paneIndex> — /win list shows indices");
+				return;
+			}
+			if (!ctx.windows.switchTo(idx)) {
+				io.error(`No pane at index ${idx}. /win list shows indices.`);
+				return;
+			}
+			io.info(`Active pane: ${ctx.windows.active}`);
+			break;
+		}
+
+		case "win":
+			await handleWin(args, ctx);
+			break;
 
 		case "quit":
 			io.info("Shutting down...");
