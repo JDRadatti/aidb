@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
+import { WatchListView, type WatchEvaluator } from "./views/watch.ts";
 
 export interface ReplIO {
 	line(text: string): void;
@@ -16,6 +17,7 @@ export interface ReplContext {
 	getApi(): DebuggerAPI;
 	reset(): Promise<DebuggerAPI>;
 	requestExit(): void;
+	requestRender(): void;
 	io: ReplIO;
 	windows: WindowManager;
 }
@@ -35,6 +37,7 @@ const HELP = [
 	"  bt                          backtrace (aliases: backtrace, where)",
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  info locals | info args     variables and arguments of the current frame",
+	"  /watch <expr>               pin an expression to a live watch pane across stops",
 	"",
 	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | next | list;",
 	"  /switch <idx|name> focuses a pane. Blank panes show their index. See: help win.",
@@ -63,10 +66,13 @@ const WIN_HELP = [
 	"  /switch <idx|name>                          make that pane active",
 	"  /win list                                   print idx -> id mapping (indices",
 	"                                              shift on close!)",
+	"  /watch <expr>                               pin an expression to a live watch",
+	"                                              pane (auto-creates 'watch')",
 	"",
 	"Notes:",
 	"  - Indices are positions in /win list order, not permanent ids. Name panes",
 	"    on creation (/win vsplit 0 mem) and address them by name instead.",
+	"  - Names starting with 'watch' mount a live watch view instead of a blank",
 	"  - Max 3 columns x 3 rows; splits beyond that are rejected.",
 	"  - Planned: tmux-style leader keys (e.g. Ctrl+a then key) once the",
 	"    mechanics here are proven — see windows-plan.html.",
@@ -104,6 +110,34 @@ function resolveProgram(p: string): string {
 
 function cwdHint(io: ReplIO): void {
 	io.info(`Relative paths are resolved against: ${process.cwd()} — use an absolute path, or Tab-complete, if that's not where your binary lives.`);
+}
+
+/**
+ * Live watch panes: names starting with "watch" mount a WatchListView instead
+ * of a blank slab. Expressions come from /watch since panes never take keys.
+ */
+function makeWatchView(ctx: ReplContext, id: string): WatchListView {
+	const evaluator: WatchEvaluator = async (expr) => String(await ctx.getApi().evaluate(expr, "watch"));
+	return new WatchListView(evaluator, { id, onChange: () => ctx.requestRender() });
+}
+
+/** The first unused id in the series "watch", "watch2", "watch3", ... */
+export function nextWatchId(windows: WindowManager): string {
+	const taken = new Set(windows.list().map((p) => p.id));
+	if (!taken.has("watch")) return "watch";
+	for (let i = 2; ; i++) {
+		if (!taken.has(`watch${i}`)) return `watch${i}`;
+	}
+}
+
+/** Find an existing live watch pane by id, or undefined. */
+export function findWatchView(windows: WindowManager): { id: string; view: WatchListView } | undefined {
+	for (const pane of windows.list()) {
+		if (!pane.id.startsWith("watch")) continue;
+		const view = windows.component(pane.id);
+		if (view instanceof WatchListView) return { id: pane.id, view };
+	}
+	return undefined;
 }
 
 function requireStopped(api: DebuggerAPI, io: ReplIO): boolean {
@@ -432,8 +466,16 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			}
 			const dir: SplitDir = sub === "vsplit" ? "v" : "h";
 			const result = windows.split(dir, idx, name);
-			if (result.ok) io.success(`Created '${result.value}' — /win list shows indices.`);
-			else io.error(result.error);
+			if (!result.ok) {
+				io.error(result.error);
+				return;
+			}
+			if (name?.startsWith("watch")) {
+				windows.mount(result.value, makeWatchView(ctx, result.value));
+				io.success(`Created '${result.value}' — a live watch pane. /watch <expr> adds expressions.`);
+			} else {
+				io.success(`Created '${result.value}' — /win list shows indices.`);
+			}
 			return;
 		}
 		case "close": {
@@ -566,6 +608,32 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 		case "win":
 			await handleWin(args, ctx);
 			break;
+
+		case "watch": {
+			const expr = args.trim();
+			if (!expr) {
+				io.error("Usage: /watch <expr> — re-evaluated after every stop");
+				return;
+			}
+			let found = findWatchView(ctx.windows);
+			if (!found) {
+				const id = nextWatchId(ctx.windows);
+				const previous = ctx.windows.active;
+				const result = ctx.windows.split("v", undefined, id);
+				if (!result.ok) {
+					io.error(`${result.error} — create a pane first: /win hsplit watch`);
+					return;
+				}
+				ctx.windows.mount(result.value, makeWatchView(ctx, result.value));
+				ctx.windows.switchTo(previous); // auto-create must not steal focus
+				found = findWatchView(ctx.windows);
+				io.info(`Created live watch pane '${id}'.`);
+			}
+			if (!found) return;
+			found.view.add(expr);
+			ctx.requestRender();
+			break;
+		}
 
 		case "quit":
 			io.info("Shutting down...");

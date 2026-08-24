@@ -15,6 +15,7 @@ function makeContext() {
 		getApi: () => ({}) as never,
 		reset: async () => ({}) as never,
 		requestExit: () => {},
+		requestRender: () => {},
 		io,
 		windows: {} as never,
 	};

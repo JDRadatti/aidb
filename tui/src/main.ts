@@ -137,6 +137,7 @@ const replCtx: ReplContext = {
 	getApi: () => dbg.api,
 	reset: resetDebugger,
 	requestExit: () => void shutdown(),
+	requestRender: () => tui.requestRender(),
 	io,
 	windows,
 };

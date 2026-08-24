@@ -218,6 +218,11 @@ export class WindowManager implements Component {
 		return this.tree.panes().indexOf(id);
 	}
 
+	/** The component currently mounted in a pane, if any. */
+	component(id: PaneId): Component | undefined {
+		return this.deps.panes.get(id);
+	}
+
 	get active(): PaneId {
 		return this.tree.active;
 	}
@@ -260,7 +265,7 @@ export class WindowManager implements Component {
 
 	render(width: number): string[] {
 		this.sizePanes();
-		return this.component().render(width);
+		return this.layout().render(width);
 	}
 
 	invalidate(): void {
@@ -272,7 +277,7 @@ export class WindowManager implements Component {
 	 * alt-screen (rect-based layout, scroll viewports) works unchanged.
 	 */
 	[LAYOUT_NODE](): LayoutNode {
-		const root = this.component() as Partial<Record<typeof LAYOUT_NODE, () => LayoutNode>>;
+		const root = this.layout() as Partial<Record<typeof LAYOUT_NODE, () => LayoutNode>>;
 		const node = root[LAYOUT_NODE]?.();
 		if (!node) throw new Error("window manager root must be a stack component");
 		return node;
@@ -290,7 +295,7 @@ export class WindowManager implements Component {
 		return `pane${i}`;
 	}
 
-	private component(): Component {
+	private layout(): Component {
 		if (this.cachedComponent && this.cachedVersion === this.version) return this.cachedComponent;
 		// The root is always a stack (single leaves get wrapped) so the
 		// LAYOUT_NODE delegation above always has something to hand back.

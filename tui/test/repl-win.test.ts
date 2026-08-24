@@ -4,8 +4,9 @@ import type { Component } from "@earendil-works/pi-tui";
 import { handleReplInput, type ReplContext, type ReplIO } from "../src/repl.ts";
 import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
+import { WatchListView } from "../src/views/watch.ts";
 
-function makeContext() {
+function makeContext(api: Record<string, unknown> = {}) {
 	const messages: Array<{ kind: string; text: string }> = [];
 	const io: ReplIO = {
 		line: (text) => messages.push({ kind: "line", text }),
@@ -14,17 +15,21 @@ function makeContext() {
 		warning: (text) => messages.push({ kind: "warning", text }),
 		error: (text) => messages.push({ kind: "error", text }),
 	};
-	const windows = new WindowManager(new SplitTree("repl"), {
-		panes: new Map<string, Component>([["repl", { render: () => [], invalidate: () => {} }]]),
-	});
+	const panes = new Map<string, Component>([["repl", { render: () => [], invalidate: () => {} }]]);
+	const windows = new WindowManager(new SplitTree("repl"), { panes });
 	const ctx: ReplContext = {
-		getApi: () => ({}) as never,
+		getApi: () =>
+			({
+				evaluate: async (expr: string) => `${expr}=42`,
+				...api,
+			}) as never,
 		reset: async () => ({}) as never,
 		requestExit: () => {},
+		requestRender: () => {},
 		io,
 		windows,
 	};
-	return { ctx, windows, messages };
+	return { ctx, windows, panes, messages };
 }
 
 const lastMessage = (messages: ReturnType<typeof makeContext>["messages"]): string =>
@@ -93,5 +98,34 @@ describe("window commands", () => {
 		await handleReplInput("/win vsplit 0 mem", ctx);
 		await handleReplInput("/win close mem", ctx);
 		assert.deepEqual(windows.list().map((p) => p.id), ["repl"]);
+	});
+
+	it("watch-named splits mount a live WatchListView", async () => {
+		const { ctx, panes } = makeContext();
+		await handleReplInput("/win hsplit 0 watch", ctx);
+		const view = panes.get("watch");
+		assert.ok(view instanceof WatchListView);
+	});
+
+	it("/watch auto-creates a live pane and pins expressions", async () => {
+		const { ctx, windows, panes, messages } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		const view = panes.get("watch");
+		assert.ok(view instanceof WatchListView, "expected an auto-created watch pane");
+		assert.equal(windows.active, "repl"); // creating the pane must not steal focus
+		assert.match(messages.map((m) => m.text).join("\n"), /Created live watch pane 'watch'/);
+		assert.equal(view.getEntries().length, 1);
+		assert.equal(view.getEntries()[0].expr, "i");
+		await new Promise((r) => setTimeout(r, 0)); // let the evaluator settle
+		assert.match(view.getEntries()[0].value!, /=42$/);
+	});
+
+	it("a second /watch expression reuses the existing pane", async () => {
+		const { ctx, windows } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		await handleReplInput("/watch sum", ctx);
+		assert.deepEqual(windows.list().map((p) => p.id), ["repl", "watch"]);
+		const view = windows.component("watch") as WatchListView;
+		assert.deepEqual(view.getEntries().map((e) => e.expr), ["i", "sum"]);
 	});
 });
