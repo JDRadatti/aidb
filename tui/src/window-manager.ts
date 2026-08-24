@@ -88,7 +88,14 @@ class PaneChrome implements Component {
 	render(width: number): string[] {
 		const idx = this.idx();
 		const title = `${this.child instanceof View ? this.child.title || this.paneId : this.paneId}${this.manager.tree.active === this.paneId ? " *" : ""}`;
-		const body = this.child.render(width);
+		let body = this.child.render(width);
+		// Panes are fixed-height: clip overflow to the allotted rows, keeping
+		// the tail (the latest output for a transcript). Without this a long
+		// transcript stretches the whole document and pushes sibling panes
+		// offscreen above.
+		if (this.manager.bodyRows > 0 && body.length > this.manager.bodyRows) {
+			body = body.slice(-this.manager.bodyRows);
+		}
 		// Pad short panes so backgrounds stay continuous beside taller siblings.
 		while (body.length < this.manager.bodyRows) body.push("");
 		return [tint(` ${title}`, width, idx), ...body.map((line) => tint(line, width, idx))];

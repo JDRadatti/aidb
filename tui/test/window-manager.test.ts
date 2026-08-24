@@ -130,9 +130,28 @@ describe("WindowManager", () => {
 		wm.register("b", stubPane("B"));
 		assert.ok(wm.split("h", 0, "b").ok);
 		const lines = wm.render(30).map(strip);
-		assert.equal(lines.length, 8); // 2 titles + 2x3 rows
+		assert.equal(lines.length, 6); // 2 titles + 2x2 clipped body rows
 		assert.ok(lines[1].startsWith("R"));
 		assert.ok(lines[5].startsWith("B"));
+	});
+
+	it("an oversized transcript is clipped to the pane height, keeping the tail", () => {
+		const wm = makeManager("repl");
+		const transcriptLines = (n: number): Component => ({
+			id: "repl",
+			render: () => Array.from({ length: n }, (_, i) => `line${i}`),
+			invalidate: () => {},
+		});
+		wm.register("repl", transcriptLines(50));
+		let lines = wm.render(40).map(strip);
+		assert.equal(lines.length, 1 + wm.bodyRows); // title + fixed body, regardless of content
+		assert.ok(lines.some((l) => l.includes("line49")), "latest line must stay visible");
+		assert.ok(!lines.some((l) => l.includes("line0")), "old lines scroll away");
+		// Simulating `help`: more output must not grow the document.
+		wm.register("repl", transcriptLines(80));
+		lines = wm.render(40).map(strip);
+		assert.equal(lines.length, 1 + wm.bodyRows);
+		assert.ok(lines.some((l) => l.includes("line79")));
 	});
 
 	it("unregistered panes render as slabs, not errors", () => {
