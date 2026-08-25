@@ -2,9 +2,21 @@
  * REPL bridge that intercepts Pi input and routes GDB commands via DAP.
  */
 
+import { Buffer } from "node:buffer";
 import type { DapClient } from "./dap-client.ts";
 import type { DebuggerEventBus } from "./event-bus.ts";
-import type { Breakpoint, SessionState, StackFrame, Variable, DebuggerAPI } from "./types.ts";
+import type {
+	Breakpoint,
+	DapCapabilities,
+	EvaluateInfo,
+	Instruction,
+	MemoryRead,
+	SessionState,
+	StackFrame,
+	ThreadInfo,
+	Variable,
+	DebuggerAPI,
+} from "./types.ts";
 
 /**
  * GDB commands that should be routed to DAP evaluate.
@@ -70,11 +82,43 @@ export function createDebuggerAPI(
 	let activeThreadId = 1;
 	let started = false;
 
+	/**
+	 * Per-stop observation state. Every "stopped" event bumps `stopSeq` and
+	 * drops the caches, so panes re-querying the same data within one stop
+	 * coalesce into a single DAP round-trip while fresh stops always refetch.
+	 * Frame ids are DAP-scoped to the stop they came from — the selection is
+	 * reset on every stop so watches never pin a stale frame.
+	 */
+	let stopSeq = 0;
+	let selectedFrameId: number | null = null;
+	let cachedStack: { seq: number; frames: StackFrame[] } | null = null;
+	const scopesCache = new Map<number, any>();
+	const variablesCache = new Map<number, Variable[]>();
+
+	function invalidateStopData(): void {
+		cachedStack = null;
+		scopesCache.clear();
+		variablesCache.clear();
+		selectedFrameId = null;
+	}
+
+	eventBus.on("stopped", () => {
+		stopSeq++;
+		invalidateStopData();
+	});
+	eventBus.on("continued", invalidateStopData);
+	eventBus.on("session:exited", invalidateStopData);
+
 	async function ensureStarted() {
 		if (!started) {
 			started = true;
 			await dapClient.start();
 		}
+	}
+
+	function capabilitiesSafe(): DapCapabilities {
+		const caps = (dapClient as unknown as { getCapabilities?: () => unknown }).getCapabilities?.();
+		return (caps ?? {}) as DapCapabilities;
 	}
 
 	/**
@@ -94,6 +138,43 @@ export function createDebuggerAPI(
 		} catch {
 			// Target may resume or exit before we can read the stack; keep last known location.
 		}
+	}
+
+	/** Stack for the active thread, memoized for the duration of one stop. */
+	async function getStackCached(): Promise<StackFrame[]> {
+		if (cachedStack && cachedStack.seq === stopSeq) return cachedStack.frames;
+		let result: any;
+		try {
+			result = await dapClient.sendRequest("stackTrace", { threadId: activeThreadId });
+		} catch {
+			// No live stack (e.g. target running, exited, or never started).
+			// GDB replies with raw internal errors here; don't leak them.
+			return [];
+		}
+		const frames: StackFrame[] = (result.stackFrames ?? []).map((frame: any) => ({
+			id: frame.id,
+			name: frame.name,
+			file: frame.source?.path ?? "",
+			line: frame.line,
+			column: frame.column,
+		}));
+		cachedStack = { seq: stopSeq, frames };
+		return frames;
+	}
+
+	/** Index of the user-selected frame (top frame when nothing is selected). */
+	function selectedIndex(frames: StackFrame[]): number {
+		if (selectedFrameId === null) return 0;
+		const idx = frames.findIndex((f) => f.id === selectedFrameId);
+		return idx >= 0 ? idx : 0;
+	}
+
+	/** Frame id evaluations should pin to; undefined lets gdb use its default. */
+	async function resolveEvalFrameId(): Promise<number | undefined> {
+		if (stateMachine.getState() !== "stopped") return undefined;
+		const frames = await getStackCached();
+		if (frames.length === 0) return undefined;
+		return frames[selectedIndex(frames)].id;
 	}
 
 	function emitLocation(): void {
@@ -145,6 +226,8 @@ export function createDebuggerAPI(
 		} else {
 			stateMachine.forceState?.("launching");
 		}
+		stopSeq++;
+		invalidateStopData();
 		sourceFile = null;
 		currentLine = 0;
 		currentColumn = 0;
@@ -154,12 +237,21 @@ export function createDebuggerAPI(
 	/**
 	 * DAP's setBreakpoints replaces the full breakpoint list for a file,
 	 * so every mutation must send the complete desired list for that file
-	 * (sending just one line would silently delete the others).
+	 * (sending just one line would silently delete the others). GDB does
+	 * NOT dedupe identical locations within one call — duplicates multiply.
 	 */
+	function notifyBreakpointsChanged(): void {
+		eventBus.emit("breakpoints-changed", {});
+	}
+
 	function desiredList(file: string): Array<{ line: number; condition?: string }> {
 		return Array.from(breakpoints.values())
 			.filter((bp) => bp.file === file)
 			.map((bp) => ({ line: bp.line, condition: bp.condition }));
+	}
+
+	function sameCondition(a?: string, b?: string): boolean {
+		return (a ?? undefined) === (b ?? undefined);
 	}
 
 	async function syncFileBreakpoints(file: string, extra?: { line: number; condition?: string }): Promise<Breakpoint | undefined> {
@@ -187,6 +279,7 @@ export function createDebuggerAPI(
 			created.push(nb);
 		});
 
+		notifyBreakpointsChanged();
 		if (extra) return created[created.length - 1];
 		return undefined;
 	}
@@ -253,6 +346,18 @@ export function createDebuggerAPI(
 		},
 
 		async setBreakpoint(file: string, line: number, condition?: string) {
+			// GDB DAP does not dedupe locations within one setBreakpoints call:
+			// re-breaking the same file:line would create a second real
+			// breakpoint. Return the existing entry, or update its condition.
+			const sameLine = Array.from(breakpoints.values()).filter((bp) => bp.file === file && bp.line === line);
+			if (sameLine.length > 0 && sameCondition(sameLine[0].condition, condition)) {
+				return sameLine[0];
+			}
+			if (sameLine.length > 0) {
+				sameLine[0].condition = condition;
+				await syncFileBreakpoints(file);
+				return Array.from(breakpoints.values()).find((bp) => bp.file === file && bp.line === line)!;
+			}
 			const bp = await syncFileBreakpoints(file, { line, condition });
 			return bp!;
 		},
@@ -261,10 +366,26 @@ export function createDebuggerAPI(
 			const bp = breakpoints.get(id);
 			if (!bp) return;
 			breakpoints.delete(id);
-			await dapClient.sendRequest("setBreakpoints", {
-				source: { path: bp.file },
-				breakpoints: desiredList(bp.file),
-			});
+			if (bp.location !== undefined || !bp.file) {
+				// Created via raw GDB passthrough: invisible to GDB's per-file
+				// DAP bookkeeping, so only the console command removes it.
+				await dapClient.sendRequest("evaluate", { expression: `delete ${id}`, context: "repl" });
+			} else {
+				await dapClient.sendRequest("setBreakpoints", {
+					source: { path: bp.file },
+					breakpoints: desiredList(bp.file),
+				});
+			}
+			notifyBreakpointsChanged();
+		},
+
+		trackExternalBreakpoint(id: number, location?: string): Breakpoint {
+			const existing = breakpoints.get(id);
+			if (existing) return existing;
+			const nb: Breakpoint = { id, file: "", line: 0, verified: true, location };
+			breakpoints.set(id, nb);
+			notifyBreakpointsChanged();
+			return nb;
 		},
 
 		async listBreakpoints() {
@@ -276,32 +397,23 @@ export function createDebuggerAPI(
 		},
 
 		async getStack() {
-			let result: any;
-			try {
-				result = await dapClient.sendRequest("stackTrace", { threadId: activeThreadId });
-			} catch {
-				// No live stack (e.g. target running, exited, or never started).
-				// GDB replies with raw internal errors here; don't leak them.
-				return [];
-			}
-			return (result.stackFrames ?? []).map((frame: any) => ({
-				id: frame.id,
-				name: frame.name,
-				file: frame.source?.path ?? "",
-				line: frame.line,
-				column: frame.column,
-			}));
+			return getStackCached();
 		},
 
 		async getVariables(scope?: "local" | "global" | "args") {
 			const stack = await this.getStack();
 			if (stack.length === 0) return [];
+			const frame = stack[selectedIndex(stack)];
 
-			const scopesResult = await dapClient.sendRequest("scopes", {
-				frameId: stack[0].id,
-			});
+			let scopes = scopesCache.get(frame.id);
+			if (!scopes) {
+				const scopesResult = await dapClient.sendRequest("scopes", {
+					frameId: frame.id,
+				});
+				scopes = scopesResult.scopes ?? [];
+				scopesCache.set(frame.id, scopes);
+			}
 
-			const scopes = scopesResult.scopes ?? [];
 			const targetScope = scope === "global"
 				? scopes.find((s: any) => /^global/i.test(s.name))
 				: scope === "args"
@@ -310,27 +422,125 @@ export function createDebuggerAPI(
 
 			if (!targetScope) return [];
 
-			const varsResult = await dapClient.sendRequest("variables", {
-				variablesReference: targetScope.variablesReference,
-			});
+			const vars = await this.getVariableChildren(targetScope.variablesReference);
+			return vars;
+		},
 
-			return (varsResult.variables ?? []).map((v: any) => ({
+		async selectFrame(frameId: number): Promise<void> {
+			const frames = await getStackCached();
+			const frame = frames.find((f) => f.id === frameId);
+			if (!frame) {
+				throw new Error(`No frame ${frameId} in the current stack (${frames.length} frames).`);
+			}
+			selectedFrameId = frameId;
+			if (frame.file) sourceFile = frame.file;
+			if (frame.line) currentLine = frame.line;
+			emitLocation();
+		},
+
+		selectedFrame(): StackFrame | null {
+			if (selectedFrameId === null || !cachedStack || cachedStack.seq !== stopSeq) return null;
+			return cachedStack.frames.find((f) => f.id === selectedFrameId) ?? null;
+		},
+
+		async evaluateDetailed(expression: string, context: string = "watch"): Promise<EvaluateInfo> {
+			await ensureStarted();
+			const frameId = await resolveEvalFrameId();
+			const result = await dapClient.sendRequest("evaluate", {
+				expression,
+				frameId,
+				context,
+			});
+			return {
+				result: String(result.result ?? ""),
+				type: result.type,
+				variablesReference: result.variablesReference ?? 0,
+				namedVariables: result.namedVariables,
+				indexedVariables: result.indexedVariables,
+				memoryReference: result.memoryReference,
+			};
+		},
+
+		async getVariableChildren(reference: number, start?: number, count?: number): Promise<Variable[]> {
+			const cached = variablesCache.get(reference);
+			if (cached) return cached;
+			const varsResult = await dapClient.sendRequest("variables", {
+				variablesReference: reference,
+				start,
+				count,
+			});
+			const vars: Variable[] = (varsResult.variables ?? []).map((v: any) => ({
 				name: v.name,
 				value: v.value,
 				type: v.type ?? "unknown",
-				variablesReference: v.variablesReference,
+				variablesReference: v.variablesReference ?? 0,
+				namedVariables: v.namedVariables,
+				indexedVariables: v.indexedVariables,
+				memoryReference: v.memoryReference,
+				presentationHint: v.presentationHint,
+				evaluateName: v.evaluateName,
 			}));
+			variablesCache.set(reference, vars);
+			return vars;
+		},
+
+		async readMemory(expression: string, count: number, offset?: number): Promise<MemoryRead> {
+			await ensureStarted();
+			if (capabilitiesSafe().supportsReadMemoryRequest) {
+				try {
+					const result = await dapClient.sendRequest("readMemory", {
+						memoryReference: expression,
+						offset,
+						count,
+					});
+					const data = new Uint8Array(Buffer.from(result?.data ?? "", "base64"));
+					return { address: result?.address ?? expression, data };
+				} catch {
+					// Adapter advertised support but refused (bad symbol, unmapped
+					// page…). Fall through to the console path so the pane still works.
+				}
+			}
+			const text = await this.evaluate(`x/${count}xb ${expression}`, "repl");
+			const { address, bytes } = parseXBytes(String(text ?? ""));
+			if (bytes.length === 0) {
+				throw new Error(`Could not read ${count} bytes at '${expression}'.`);
+			}
+			return { address: address ?? expression, data: bytes };
+		},
+
+		async disassemble(memoryReference: string, instructionCount: number): Promise<Instruction[]> {
+			await ensureStarted();
+			if (!capabilitiesSafe().supportsDisassembleRequest) {
+				throw new Error("This gdb DAP adapter does not advertise disassemble support.");
+			}
+			const result = await dapClient.sendRequest("disassemble", {
+				memoryReference,
+				instructionCount,
+			});
+			return (result?.instructions ?? []).map((ins: any) => ({
+				address: ins.address,
+				instructionBytes: ins.instructionBytes,
+				instruction: ins.instruction,
+				line: ins.line,
+				column: ins.location?.column ?? ins.column,
+			}));
+		},
+
+		async listThreads(): Promise<ThreadInfo[]> {
+			await ensureStarted();
+			const result = await dapClient.sendRequest("threads");
+			return (result?.threads ?? []).map((t: any) => ({ id: t.id, name: t.name }));
+		},
+
+		capabilities(): DapCapabilities {
+			return capabilitiesSafe();
 		},
 
 		async evaluate(expression: string, context: string = "watch") {
 			await ensureStarted();
 			// Only pin to a frame while the target is stopped. Asking for a stack
 			// while running/exited makes GDB's DAP blow up with internal Python errors.
-			let frameId: number | undefined;
-			if (stateMachine.getState() === "stopped") {
-				const stack = await this.getStack();
-				frameId = stack[0]?.id;
-			}
+			const frameId = await resolveEvalFrameId();
 			const result = await dapClient.sendRequest("evaluate", {
 				expression,
 				frameId,
@@ -380,4 +590,35 @@ export function isGdbCommand(input: string): boolean {
 	}
 
 	return false;
+}
+
+/**
+ * Parse `x/Nxb ADDR` console output into raw bytes.
+ *
+ * GDB prints a `ADDR <symbol>:` header, then hex byte tokens separated by
+ * tabs, wrapping onto continuation lines that carry no header:
+ *
+ *   0x55f1a0 &lt;player&gt;:	0x64	0x00	0x00
+ *   	0xff	0x7f
+ *
+ * The resolved address is taken from the header so callers can label rows
+ * even on the fallback path where readMemory never ran.
+ */
+export function parseXBytes(text: string): { address?: string; bytes: Uint8Array } {
+	let address: string | undefined;
+	const bytes: number[] = [];
+	for (const line of text.split("\n")) {
+		let payload = line;
+		if (!address) {
+			const header = line.match(/^\s*(0x[0-9a-fA-F]+)\s*[^:]*:/);
+			if (header) {
+				address = header[1];
+				payload = line.slice(header[0].length);
+			}
+		}
+		for (const token of payload.matchAll(/0x([0-9a-fA-F]{2})\b/g)) {
+			bytes.push(Number.parseInt(token[1], 16));
+		}
+	}
+	return { address, bytes: new Uint8Array(bytes) };
 }

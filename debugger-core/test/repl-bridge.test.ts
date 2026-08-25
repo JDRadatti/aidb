@@ -12,6 +12,7 @@ import type { DebuggerAPI } from "../src/types.ts";
 class FakeDapClient {
 	requests: Array<{ command: string; args?: any }> = [];
 	private responders = new Map<string, (args?: any) => any>();
+	capabilities: Record<string, any> = {};
 
 	onRequest(command: string, responder: (args?: any) => any) {
 		this.responders.set(command, responder);
@@ -21,6 +22,10 @@ class FakeDapClient {
 
 	async prepareInferiorIo() {}
 
+	getCapabilities() {
+		return this.capabilities;
+	}
+
 	sendRequest(command: string, args?: any): Promise<any> {
 		this.requests.push({ command, args });
 		const responder = this.responders.get(command);
@@ -29,6 +34,10 @@ class FakeDapClient {
 
 	lastCommand(): string | undefined {
 		return this.requests.at(-1)?.command;
+	}
+
+	count(command: string): number {
+		return this.requests.filter((r) => r.command === command).length;
 	}
 }
 
@@ -237,6 +246,61 @@ describe("breakpoint management", () => {
 		const lines = (await api.listBreakpoints()).map((bp) => bp.line);
 		expect(lines).toEqual([20]);
 	});
+
+	it("does not duplicate a breakpoint when the same location is set twice", async () => {
+		const { api, fake } = setup();
+		await api.launch("./app");
+
+		await api.setBreakpoint("/tmp/main.c", 12);
+		const again = await api.setBreakpoint("/tmp/main.c", 12);
+
+		expect(again.line).toBe(12);
+		expect(fake.requests.filter((r) => r.command === "setBreakpoints")).toHaveLength(1);
+		expect(await api.listBreakpoints()).toHaveLength(1);
+	});
+
+	it("updates the condition when the same line is re-broken with one", async () => {
+		const { api, fake } = setup();
+		await api.launch("./app");
+
+		await api.setBreakpoint("/tmp/main.c", 12);
+		const updated = await api.setBreakpoint("/tmp/main.c", 12, "i > 3");
+
+		const lastCall = fake.requests.filter((r) => r.command === "setBreakpoints").at(-1);
+		expect(lastCall?.args.breakpoints).toEqual([{ line: 12, condition: "i > 3" }]);
+		expect(updated.condition).toBe("i > 3");
+		expect(await api.listBreakpoints()).toHaveLength(1);
+	});
+
+	it("tracks breakpoints created through raw GDB and deletes them via console", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("evaluate", () => ({ result: "Breakpoint 2 at 0x401136" }));
+		await api.launch("./app");
+
+		const tracked = api.trackExternalBreakpoint(2, "main");
+		expect(tracked.location).toBe("main");
+		expect((await api.listBreakpoints()).map((bp) => bp.id)).toContain(2);
+
+		await api.removeBreakpoint(2);
+
+		const del = fake.requests.filter((r) => r.command === "evaluate").at(-1);
+		expect(del?.args.expression).toBe("delete 2");
+		expect(fake.requests.some((r) => r.command === "setBreakpoints" && r.args.breakpoints.length === 0)).toBe(false);
+		expect(await api.listBreakpoints()).toHaveLength(0);
+	});
+
+	it("emits breakpoints-changed after every mutation", async () => {
+		const { api } = setup();
+		let changes = 0;
+		api.on("breakpoints-changed", () => changes++);
+
+		await api.launch("./app");
+		const bp = await api.setBreakpoint("/tmp/main.c", 12);
+		api.trackExternalBreakpoint(9, "helper");
+		await api.removeBreakpoint(bp.id);
+
+		expect(changes).toBe(3);
+	});
 });
 
 describe("evaluate passthrough", () => {
@@ -287,5 +351,283 @@ describe("stack resilience", () => {
 
 		expect(await api.getStack()).toEqual([]);
 		expect(await api.getVariables()).toEqual([]);
+	});
+});
+
+describe("frame selection", () => {
+	function twoFrameSetup() {
+		const s = setup();
+		s.fake.onRequest("stackTrace", () => ({
+			stackFrames: [
+				{ id: 7, name: "main", source: { path: "/tmp/main.c" }, line: 12, column: 1 },
+				{ id: 9, name: "helper", source: { path: "/tmp/helper.c" }, line: 3, column: 5 },
+			],
+		}));
+		return s;
+	}
+
+	it("pins evaluate to the selected frame", async () => {
+		const { api, bus, fake } = twoFrameSetup();
+		fake.onRequest("evaluate", () => ({ result: "$1 = 1" }));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.selectFrame(9);
+		await api.evaluate("print x");
+
+		const evalReq = fake.requests.find((r) => r.command === "evaluate");
+		expect(evalReq?.args.frameId).toBe(9);
+	});
+
+	it("rejects unknown frame ids", async () => {
+		const { api, bus } = twoFrameSetup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await expect(api.selectFrame(99)).rejects.toThrow(/No frame 99/);
+	});
+
+	it("resets to the top frame after a new stop", async () => {
+		const { api, bus, fake } = twoFrameSetup();
+		fake.onRequest("evaluate", () => ({ result: "$1 = 1" }));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+		await api.selectFrame(9);
+		emitStop(bus, { reason: "step", threadId: 5 });
+		await flushAsync();
+
+		expect(api.selectedFrame()).toBeNull();
+		await api.evaluate("print x");
+
+		const lastEval = fake.requests.filter((r) => r.command === "evaluate").at(-1);
+		expect(lastEval?.args.frameId).toBe(7);
+	});
+
+	it("selectedFrame reflects the choice and follows location tracking", async () => {
+		const { api, bus } = twoFrameSetup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.selectFrame(9);
+
+		const frame = api.selectedFrame();
+		expect(frame?.id).toBe(9);
+		expect(frame?.name).toBe("helper");
+	});
+});
+
+describe("per-stop caches", () => {
+	it("coalesces repeated getStack calls within one stop", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.getStack();
+		await api.getStack();
+
+		// One from the stop's own location refresh + one explicit fetch.
+		expect(fake.count("stackTrace")).toBe(2);
+	});
+
+	it("refetches the stack after the next stop", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+		await api.getStack();
+		const before = fake.count("stackTrace");
+
+		emitStop(bus, { reason: "step", threadId: 5 });
+		await flushAsync();
+		await api.getStack();
+
+		expect(fake.count("stackTrace")).toBeGreaterThan(before);
+	});
+
+	it("coalesces scopes and variables per reference within one stop", async () => {
+		const { api, bus, fake } = setup();
+		fake.onRequest("scopes", () => ({
+			scopes: [{ name: "Locals", presentationHint: "locals", variablesReference: 42 }],
+		}));
+		fake.onRequest("variables", () => ({
+			variables: [{ name: "x", value: "1", type: "int", variablesReference: 0 }],
+		}));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.getVariables();
+		await api.getVariables();
+
+		expect(fake.count("scopes")).toBe(1);
+		expect(fake.count("variables")).toBe(1);
+	});
+});
+
+describe("variable children", () => {
+	it("passes paging args through to DAP variables", async () => {
+		const { api, fake } = setup();
+		await api.launch("./app");
+
+		await api.getVariableChildren(42, 4, 10);
+
+		const req = fake.requests.at(-1)!;
+		expect(req.command).toBe("variables");
+		expect(req.args).toMatchObject({ variablesReference: 42, start: 4, count: 10 });
+	});
+
+	it("caches children per variablesReference within a stop", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("variables", () => ({
+			variables: [
+				{
+					name: "pos",
+					value: "{...}",
+					type: "Vec2",
+					variablesReference: 43,
+					namedVariables: 2,
+					memoryReference: "0x55f1b0",
+					evaluateName: "player.pos",
+				},
+			],
+		}));
+		await api.launch("./app");
+
+		const first = await api.getVariableChildren(42);
+		const second = await api.getVariableChildren(42);
+
+		expect(fake.count("variables")).toBe(1);
+		expect(second).toBe(first);
+		expect(first[0]).toMatchObject({
+			name: "pos",
+			type: "Vec2",
+			namedVariables: 2,
+			memoryReference: "0x55f1b0",
+			evaluateName: "player.pos",
+		});
+	});
+});
+
+describe("evaluateDetailed", () => {
+	it("keeps variablesReference/memoryReference/type metadata", async () => {
+		const { api, bus, fake } = setup();
+		fake.onRequest("evaluate", () => ({
+			result: "{hp: 100}",
+			type: "Player",
+			variablesReference: 77,
+			namedVariables: 3,
+			memoryReference: "0x55f1a0",
+		}));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		const info = await api.evaluateDetailed("player");
+
+		expect(info).toMatchObject({
+			result: "{hp: 100}",
+			type: "Player",
+			variablesReference: 77,
+			namedVariables: 3,
+			memoryReference: "0x55f1a0",
+		});
+		const evalReq = fake.requests.find((r) => r.command === "evaluate");
+		expect(evalReq?.args.context).toBe("watch");
+	});
+});
+
+describe("readMemory", () => {
+	const bytes64ff = Buffer.from([0x64, 0x00, 0xff]).toString("base64");
+
+	it("uses DAP readMemory and decodes base64 when supported", async () => {
+		const { api, fake } = setup();
+		fake.capabilities.supportsReadMemoryRequest = true;
+		fake.onRequest("readMemory", () => ({ address: "0x55f1a0", data: bytes64ff }));
+		await api.launch("./app");
+
+		const read = await api.readMemory("&player", 3);
+
+		const req = fake.requests.find((r) => r.command === "readMemory");
+		expect(req?.args).toMatchObject({ memoryReference: "&player", count: 3 });
+		expect(read.address).toBe("0x55f1a0");
+		expect(Array.from(read.data)).toEqual([0x64, 0x00, 0xff]);
+	});
+
+	it("falls back to x/Nxb console output without capability", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("evaluate", () => ({
+			result: "0x55f1a0 <player>:\t0x64\t0x00\n\t0xff",
+		}));
+		await api.launch("./app");
+
+		const read = await api.readMemory("&player", 3);
+
+		const req = fake.requests.find((r) => r.command === "evaluate");
+		expect(req?.args.expression).toContain("x/3xb &player");
+		expect(read.address).toBe("0x55f1a0");
+		expect(Array.from(read.data)).toEqual([0x64, 0x00, 0xff]);
+	});
+
+	it("falls back when readMemory errors despite capability", async () => {
+		const { api, fake } = setup();
+		fake.capabilities.supportsReadMemoryRequest = true;
+		fake.onRequest("readMemory", () => {
+			throw new Error("Cannot access memory address 0x0");
+		});
+		fake.onRequest("evaluate", () => ({ result: "0x10 <buf>:\t0x41\t0x42" }));
+		await api.launch("./app");
+
+		const read = await api.readMemory("buf", 2);
+
+		expect(Array.from(read.data)).toEqual([0x41, 0x42]);
+	});
+
+	it("rejects only when both paths fail", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("evaluate", () => ({ result: "No symbol \"zzz\" in current context." }));
+		await api.launch("./app");
+
+		await expect(api.readMemory("zzz", 16)).rejects.toThrow(/Could not read 16 bytes/);
+	});
+});
+
+describe("threads and disassemble", () => {
+	it("lists threads", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("threads", () => ({
+			threads: [{ id: 1, name: "main" }, { id: 5 }],
+		}));
+
+		const threads = await api.listThreads();
+
+		expect(threads).toEqual([{ id: 1, name: "main" }, { id: 5, name: undefined }]);
+	});
+
+	it("refuses disassemble without adapter capability", async () => {
+		const { api } = setup();
+
+		await expect(api.disassemble("*main", 20)).rejects.toThrow(/disassemble support/);
+	});
+
+	it("maps disassemble instructions when supported", async () => {
+		const { api, fake } = setup();
+		fake.capabilities.supportsDisassembleRequest = true;
+		fake.onRequest("disassemble", () => ({
+			instructions: [
+				{ address: "0x401136", instructionBytes: "55", instruction: "push rbp", line: 12 },
+				{ address: "0x401137", instructionBytes: "4889e5", instruction: "mov rbp,rsp" },
+			],
+		}));
+
+		const insns = await api.disassemble("*main", 2);
+
+		const req = fake.requests.at(-1)!;
+		expect(req.args.instructionCount).toBe(2);
+		expect(insns[0]).toMatchObject({ address: "0x401136", instruction: "push rbp", line: 12 });
 	});
 });

@@ -1,9 +1,15 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { readFile } from "node:fs/promises";
+import type { Component } from "@earendil-works/pi-tui";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
+import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView, type WatchEvaluator } from "./views/watch.ts";
+import { AssemblyBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
+import { INTERPRETERS } from "./viz/interpreters.ts";
+import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 
 export interface ReplIO {
 	line(text: string): void;
@@ -38,9 +44,10 @@ const HELP = [
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  info locals | info args     variables and arguments of the current frame",
 	"  /watch <expr>               pin an expression to a live watch pane across stops",
+	"  /win load <pane> <spec>     bind a live visualizer: regs · mem &x · plot n · tree s · source · asm",
 	"",
 	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | next | list;",
-	"  /switch <idx|name> focuses a pane. Blank panes show their index. See: help win.",
+	"  /win pick [idx] [view] swaps how a live pane renders; /switch <idx|name> focuses a pane.",
 	"",
 	"Anything else is passed to GDB verbatim: info registers, x/4xw, disassemble, pwd, ...",
 	"Relative paths resolve against the directory aidb was started in; Tab completes file paths.",
@@ -68,6 +75,9 @@ const WIN_HELP = [
 	"                                              shift on close!)",
 	"  /watch <expr>                               pin an expression to a live watch",
 	"                                              pane (auto-creates 'watch')",
+	"  /win load <idx|name> <what>                 bind a live visualizer into a pane:",
+	"                                              regs · mem &buf · plot n · tree player · source · asm",
+	"  /win pick [idx|name] [view]                 list interpreters, or swap one in place",
 	"",
 	"Notes:",
 	"  - Indices are positions in /win list order, not permanent ids. Name panes",
@@ -130,28 +140,102 @@ export function nextWatchId(windows: WindowManager): string {
 	}
 }
 
-/** All live watch panes currently mounted. */
-export function findWatchViews(windows: WindowManager): Array<{ id: string; view: WatchListView }> {
-	const found: Array<{ id: string; view: WatchListView }> = [];
-	for (const pane of windows.list()) {
-		if (!pane.id.startsWith("watch")) continue;
-		const view = windows.component(pane.id);
-		if (view instanceof WatchListView) found.push({ id: pane.id, view });
-	}
-	return found;
-}
-
 /** Find an existing live watch pane by id, or undefined. */
-export function findWatchView(windows: WindowManager): { id: string; view: WatchListView } | undefined {
-	return findWatchViews(windows)[0];
+function findWatchView(windows: WindowManager): { id: string; view: WatchListView } | undefined {
+	for (const pane of windows.list()) {
+		const view = windows.component(pane.id);
+		if (view instanceof WatchListView) return { id: pane.id, view };
+	}
+	return undefined;
 }
 
 /**
- * Re-evaluate every expression in every watch pane. Called whenever the
- * target stops — the equivalent of gdb refreshing `display` expressions.
+ * Structural guard for anything that wants re-evaluation after every stop —
+ * watch lists and viz panes alike. No name-prefix sniffing.
  */
-export function refreshWatchPanes(ctx: ReplContext): void {
-	for (const { view } of findWatchViews(ctx.windows)) void view.refreshAll();
+export function isLivePane(component: Component | undefined): component is Component & LivePane {
+	return typeof (component as Partial<LivePane> | undefined)?.refreshAll === "function";
+}
+
+/**
+ * Re-run every binding in every live pane. Called whenever the target stops —
+ * the equivalent of gdb refreshing `display` expressions.
+ */
+export function refreshLivePanes(ctx: ReplContext): void {
+	for (const pane of ctx.windows.list()) {
+		const view = ctx.windows.component(pane.id);
+		if (isLivePane(view)) void view.refreshAll();
+	}
+}
+
+/** Reset run-local state while preserving mounted pane definitions. */
+export function resetLivePanes(ctx: ReplContext): void {
+	for (const pane of ctx.windows.list()) {
+		const view = ctx.windows.component(pane.id);
+		if (isLivePane(view)) view.reset?.();
+	}
+}
+
+/** `/win load` mini-syntax → a binding paired with its default interpreter. */
+export function parseLoadSpec(spec: string): { binding: Binding; interpreterId: string } | undefined {
+	const match = /^(\S+)(?:\s+(.+))?$/.exec(spec.trim());
+	if (!match) return undefined;
+	const keyword = match[1];
+	const argument = match[2];
+	switch (keyword) {
+		case "regs":
+			if (argument) return undefined;
+			return { binding: new RegistersBinding(), interpreterId: "table" };
+		case "mem":
+			if (!argument) return undefined;
+			return { binding: new MemoryBinding(argument), interpreterId: "hexdump" };
+		case "plot":
+			if (!argument) return undefined;
+			return { binding: new SeriesBinding(argument), interpreterId: "sparkline" };
+		case "tree":
+			if (!argument) return undefined;
+			return { binding: new TreeBinding(argument), interpreterId: "struct-tree" };
+		case "source":
+		case "src":
+			if (argument) return undefined;
+			return { binding: new SourceBinding(), interpreterId: "code" };
+		case "asm":
+		case "disasm":
+			if (argument) return undefined;
+			return { binding: new AssemblyBinding(), interpreterId: "code" };
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * Hosts the bindings' FetchCtx over DebuggerAPI. The api handle is fetched
+ * per call so sessions replaced by `reset` are picked up transparently.
+ * Core Variables are mapped to VarNodes here so the viz layer never imports
+ * debugger types.
+ */
+function makeFetchCtx(ctx: ReplContext): FetchCtx {
+	return {
+		evaluate: (expression, context) => ctx.getApi().evaluate(expression, context ?? "watch"),
+		evaluateDetailed: (expression) => ctx.getApi().evaluateDetailed(expression),
+		getLocation: () => ({ file: ctx.getApi().sourceFile, line: ctx.getApi().currentLine }),
+		readSource: async (file, startLine, count) => {
+			const source = await readFile(file, "utf8");
+			return source.split(/\r?\n/).slice(Math.max(0, startLine - 1), Math.max(0, startLine - 1) + count);
+		},
+		getVariableChildren: async (reference, start, count) => {
+			const children = await ctx.getApi().getVariableChildren(reference, start, count);
+			return children.map((child) => ({
+				name: child.name,
+				value: child.value,
+				type: child.type || undefined,
+				hasChildren: child.variablesReference > 0,
+				ref: child.variablesReference > 0 ? child.variablesReference : undefined,
+			}));
+		},
+		readMemory: (expression, count, offset) => ctx.getApi().readMemory(expression, count, offset),
+		disassemble: (memoryReference, instructionCount) => ctx.getApi().disassemble(memoryReference, instructionCount),
+	};
 }
 
 function requireStopped(api: DebuggerAPI, io: ReplIO): boolean {
@@ -261,7 +345,13 @@ async function handleBreak(argStr: string, api: DebuggerAPI, io: ReplIO): Promis
 			io.error("Usage: break <file:line | line | function> [if condition]");
 			return;
 		}
-		await passthrough(`break ${argStr}`, api, io);
+		// Function-name form: GDB resolves it natively. Track the created
+		// breakpoint so the count, `info breakpoints` and `delete` stay honest.
+		const result = await api.evaluate(`break ${argStr}`, "repl");
+		const text = String(result ?? "");
+		if (text) io.line(text);
+		const created = text.match(/Breakpoint (\d+)/);
+		if (created) api.trackExternalBreakpoint(Number(created[1]), argStr);
 		return;
 	}
 
@@ -314,7 +404,8 @@ async function printBreakpoints(api: DebuggerAPI, io: ReplIO): Promise<void> {
 		return;
 	}
 	for (const bp of bps) {
-		io.line(`${bp.id}\t${bp.file}:${bp.line}${bp.condition ? ` if ${bp.condition}` : ""}${bp.verified ? "" : " (pending)"}`);
+		const where = bp.location ?? `${bp.file}:${bp.line}`;
+		io.line(`${bp.id}\t${where}${bp.condition ? ` if ${bp.condition}` : ""}${bp.verified ? "" : " (pending)"}`);
 	}
 }
 
@@ -512,8 +603,76 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			}
 			return;
 		}
+		case "load": {
+			if (rest.length < 2) {
+				io.error("Usage: /win load <idx|name> regs | mem <expr> | plot <expr> | tree <expr> | source | asm");
+				return;
+			}
+			const target = windows.resolve(rest[0]);
+			if (!target) {
+				io.error(/^\d+$/.test(rest[0]) ? `No pane at index ${rest[0]}. /win list shows indices.` : `No pane named '${rest[0]}'.`);
+				return;
+			}
+			if (target === "repl") {
+				io.error("'repl' hosts the transcript — split first: /win vsplit live");
+				return;
+			}
+			const parsed = parseLoadSpec(rest.slice(1).join(" "));
+			if (!parsed) {
+				io.error(`Cannot visualize '${rest.slice(1).join(" ")}'. Try: regs · mem &buf · plot n · tree player · source · asm`);
+				return;
+			}
+			const view = new LivePaneView(parsed.binding, parsed.interpreterId, makeFetchCtx(ctx), {
+				id: target,
+				onChange: () => ctx.requestRender(),
+			});
+			windows.mount(target, view);
+			windows.switchTo(target);
+			void view.refreshAll();
+			io.success(`Bound '${target}' to ${parsed.binding.describe()} (${parsed.interpreterId}).`);
+			return;
+		}
+		case "pick": {
+			let ref: string | undefined;
+			let interpreterId: string | undefined;
+			for (const word of rest) {
+				if (INTERPRETERS[word]) interpreterId = word;
+				else if (ref === undefined) ref = word;
+				else {
+					io.error(`Usage: /win pick [idx|name] [${Object.keys(INTERPRETERS).join("|")}]`);
+					return;
+				}
+			}
+			if (!interpreterId) {
+				const current = ref === undefined ? undefined : windows.component(windows.resolve(ref) ?? "");
+				io.line("Interpreters:");
+				for (const { id, title } of Object.values(INTERPRETERS)) {
+					const marker = current instanceof LivePaneView && current.getInterpreterId() === id ? " *" : "";
+					io.line(`  ${(id + marker).padEnd(15)} ${title}`);
+				}
+				io.info("Swap one with: /win pick <idx|name> <interpreter>");
+				return;
+			}
+			const target = windows.resolve(ref ?? windows.active);
+			if (!target) {
+				io.error(/^\d+$/.test(ref ?? "") ? `No pane at index ${ref}.` : ref ? `No pane named '${ref}'.` : "No pane to pick on.");
+				return;
+			}
+			const component = windows.component(target);
+			if (!(component instanceof LivePaneView)) {
+				io.error(`Pane '${target}' is not a live pane. Bind one first: /win load ${target} regs`);
+				return;
+			}
+			component.setInterpreter(interpreterId);
+			windows.switchTo(target);
+			ctx.requestRender();
+			io.success(`'${target}' now renders with ${interpreterId} (${INTERPRETERS[interpreterId]!.title}).`);
+			return;
+		}
 		default:
-			io.error(`Usage: /win vsplit|hsplit [idx] [name] | close <idx|name> | next | list — 'help win' for details.`);
+			io.error(
+				`Usage: /win vsplit|hsplit [idx] [name] | load <idx|name> <spec> | pick [idx|name] [view] | close <idx|name> | next | list — 'help win' for details.`,
+			);
 	}
 }
 

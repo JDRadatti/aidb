@@ -5,6 +5,7 @@ import { View } from "../src/view.ts";
 
 class TestView extends View {
 	total = 50;
+	wide = false;
 
 	constructor(options = {}) {
 		super("test", { viewportHeight: 10, ...options });
@@ -24,7 +25,12 @@ class TestView extends View {
 	}
 
 	protected content(_width: number): string[] {
-		return Array.from({ length: this.total }, (_, i) => `line-${i}`);
+		return Array.from({ length: this.total }, (_, i) => this.wide && i === 0 ? `0123456789abcdefghijklmnopqrstuvwxyz` : `line-${i}`);
+	}
+
+	setWide(wide: boolean): void {
+		this.wide = wide;
+		this.touch();
 	}
 }
 
@@ -38,17 +44,13 @@ describe("View", () => {
 		assert.equal(lines[0], "line-0");
 	});
 
-	it("j/k move the cursor and keep it visible", () => {
+	it("ctrl+up/ctrl+down scroll by half a page", () => {
 		const view = new TestView();
 		view.render(40);
-		for (let i = 0; i < 12; i++) view.handleInput(key("j"));
-		assert.equal(view.getCursor(), 12);
-		// Cursor at row 12 with a 10-row viewport scrolls the window down.
-		assert.equal(view.getScroll(), 3);
-		const rendered = view.render(40);
-		assert.equal(rendered[9], "line-12");
-		view.handleInput(key("k"));
-		assert.equal(view.getCursor(), 11);
+		view.handleInput("\x1b[1;5B"); // ctrl+down
+		assert.equal(view.getScroll(), 5);
+		view.handleInput("\x1b[1;5A"); // ctrl+up
+		assert.equal(view.getScroll(), 0);
 	});
 
 	it("g/G jump to top and bottom", () => {
@@ -62,7 +64,7 @@ describe("View", () => {
 		assert.equal(view.getScroll(), 0);
 	});
 
-	it("ctrl+d / ctrl+u scroll by half a page", () => {
+	it("ctrl+d / ctrl+u remain view-local half-page bindings", () => {
 		const view = new TestView();
 		view.render(40);
 		view.handleInput(key("\x04")); // ctrl+d
@@ -87,9 +89,19 @@ describe("View", () => {
 		assert.equal(view.render(40).length, 4);
 	});
 
-	it("matchesKey sees the same letters we route", () => {
-		assert.ok(matchesKey(key("j"), "j"));
+	it("does not use arrow keys for scrolling", () => {
+		const view = new TestView();
+		view.setWide(true);
+		assert.equal(view.render(10)[0], "0123456789");
+		view.handleInput("\x1b[C");
+		assert.equal(view.getHorizontalScroll(), 0);
+		assert.equal(view.render(10)[0], "0123456789");
+	});
+
+	it("matchesKey sees the dedicated scroll keys", () => {
+		assert.ok(matchesKey("\x1b[1;5A", "ctrl+up"));
+		assert.ok(matchesKey("\x1b[1;5B", "ctrl+down"));
 		assert.ok(matchesKey(key("G"), "shift+g"));
-		assert.ok(!matchesKey(key("j"), "k"));
+		assert.ok(!matchesKey("\x1b[A", "ctrl+up"));
 	});
 });

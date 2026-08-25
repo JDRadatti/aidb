@@ -135,6 +135,17 @@ describe("WindowManager", () => {
 		assert.ok(lines[5].startsWith("B"));
 	});
 
+	it("keeps a full-height left pane when only the right branch is split", () => {
+		const wm = makeManager("repl");
+		assert.ok(wm.split("v").ok); // repl | pane2
+		assert.ok(wm.split("h").ok); // repl | pane2 / pane3
+
+		wm.render(80);
+		assert.equal(wm.getBodyRows("repl"), 5);
+		assert.equal(wm.getBodyRows("pane2"), 2);
+		assert.equal(wm.getBodyRows("pane3"), 2);
+	});
+
 	it("the window block fits in the rows left after screen chrome", () => {
 		// getViewRows=10, CHROME_ROWS_ESTIMATE=4 -> 6 rows for panes. One row
 		// over and flow-mode scrolling hides the title row off the top.

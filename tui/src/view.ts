@@ -10,7 +10,7 @@
  * pane can slice its own content instead of pushing hundreds of lines.
  */
 
-import { matchesKey, type Component } from "@earendil-works/pi-tui";
+import { matchesKey, sliceByColumn, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 export interface ViewOptions {
 	id?: string;
@@ -26,6 +26,7 @@ export abstract class View implements Component {
 	protected onChange?: () => void;
 
 	protected scrollRow = 0;
+	protected scrollColumn = 0;
 	protected cursorLine = 0;
 	private viewportHeight: number;
 	private lastWidth = -1;
@@ -82,14 +83,15 @@ export abstract class View implements Component {
 
 	render(width: number): string[] {
 		const all = this.lines(width);
+		this.clampHorizontal(width, all);
 		const from = Math.min(this.scrollRow, Math.max(0, all.length - this.viewportHeight));
-		const slice = all.slice(from, from + this.viewportHeight);
+		const slice = all.slice(from, from + this.viewportHeight).map((line) => sliceByColumn(line, this.scrollColumn, width, true));
 		while (slice.length < this.viewportHeight) slice.push("");
 		return slice;
 	}
 
 	/**
-	 * Default keymap: vim scrolling. Returns true when consumed; unhandled
+	 * Default navigation keymap. Returns true when consumed; unhandled
 	 * keys reach handleViewKey().
 	 */
 	handleInput(data: string): void {
@@ -112,14 +114,6 @@ export abstract class View implements Component {
 
 	protected handleKey(data: string): boolean {
 		const halfPage = Math.max(1, Math.floor(this.viewportHeight / 2));
-		if (matchesKey(data, "j") || matchesKey(data, "down")) {
-			this.moveCursor(1);
-			return true;
-		}
-		if (matchesKey(data, "k") || matchesKey(data, "up")) {
-			this.moveCursor(-1);
-			return true;
-		}
 		if (matchesKey(data, "g") || matchesKey(data, "home")) {
 			this.setCursor(0);
 			return true;
@@ -133,6 +127,14 @@ export abstract class View implements Component {
 			return true;
 		}
 		if (matchesKey(data, "ctrl+u")) {
+			this.scrollBy(-halfPage);
+			return true;
+		}
+		if (matchesKey(data, "ctrl+down")) {
+			this.scrollBy(halfPage);
+			return true;
+		}
+		if (matchesKey(data, "ctrl+up")) {
 			this.scrollBy(-halfPage);
 			return true;
 		}
@@ -169,6 +171,15 @@ export abstract class View implements Component {
 		this.changed();
 	}
 
+	protected scrollHorizontally(columns: number): void {
+		this.scrollColumn = Math.max(0, this.scrollColumn + columns);
+		this.changed();
+	}
+
+	getHorizontalScroll(): number {
+		return this.scrollColumn;
+	}
+
 	private revealCursor(): void {
 		const count = this.lineCount();
 		const maxScroll = Math.max(0, count - this.viewportHeight);
@@ -182,6 +193,11 @@ export abstract class View implements Component {
 
 	private clamp(): void {
 		this.revealCursor();
+	}
+
+	private clampHorizontal(width: number, lines: string[]): void {
+		const maxColumn = Math.max(0, ...lines.map((line) => visibleWidth(line) - width));
+		this.scrollColumn = Math.min(this.scrollColumn, maxColumn);
 	}
 
 	private ensureLines(): string[] {

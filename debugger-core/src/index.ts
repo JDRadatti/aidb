@@ -17,7 +17,20 @@ import { createDebuggerAPI, isGdbCommand } from "./repl-bridge.ts";
 import type { DebuggerAPI, DapClientConfig } from "./types.ts";
 
 // Re-export types
-export type { Breakpoint, DebuggerAPI, DebuggerEvents, DapClientConfig, SessionState, StackFrame, Variable } from "./types.ts";
+export type {
+	Breakpoint,
+	DebuggerAPI,
+	DebuggerEvents,
+	DapClientConfig,
+	SessionState,
+	StackFrame,
+	Variable,
+	EvaluateInfo,
+	MemoryRead,
+	Instruction,
+	ThreadInfo,
+	DapCapabilities,
+} from "./types.ts";
 
 // Re-export classes
 export { DapClient } from "./dap-client.ts";

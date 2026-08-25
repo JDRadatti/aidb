@@ -22,8 +22,8 @@ export const MIN_PANE_HEIGHT = 3;
 const TITLE_ROWS = 1;
 
 /**
- * Rows of screen chrome below the panes: status bar (1) + editor (top
- * border, input line, bottom border). Undercounting makes the document one
+ * Rows of screen chrome below the panes: editor (top border, input line,
+ * bottom border) + status bar (1). Undercounting makes the document one
  * row taller than the terminal, which scrolls the pane titles offscreen.
  */
 const CHROME_ROWS_ESTIMATE = 4;
@@ -91,17 +91,18 @@ class PaneChrome implements Component {
 
 	render(width: number): string[] {
 		const idx = this.idx();
+		const bodyRows = this.manager.getBodyRows(this.paneId);
 		const title = `${this.child instanceof View ? this.child.title || this.paneId : this.paneId}${this.manager.tree.active === this.paneId ? " *" : ""}`;
 		let body = this.child.render(width);
 		// Panes are fixed-height: clip overflow to the allotted rows, keeping
 		// the tail (the latest output for a transcript). Without this a long
 		// transcript stretches the whole document and pushes sibling panes
 		// offscreen above.
-		if (this.manager.bodyRows > 0 && body.length > this.manager.bodyRows) {
-			body = body.slice(-this.manager.bodyRows);
+		if (bodyRows > 0 && body.length > bodyRows) {
+			body = body.slice(-bodyRows);
 		}
 		// Pad short panes so backgrounds stay continuous beside taller siblings.
-		while (body.length < this.manager.bodyRows) body.push("");
+		while (body.length < bodyRows) body.push("");
 		return [tint(` ${title}`, width, idx), ...body.map((line) => tint(line, width, idx))];
 	}
 
@@ -118,6 +119,7 @@ export class WindowManager implements Component {
 	private cachedComponent: Component | null = null;
 	/** Body rows allotted to leaves of the tallest vertical path (chrome pads to this). */
 	bodyRows = 0;
+	private paneBodyRows = new Map<PaneId, number>();
 
 	constructor(tree: SplitTree, deps: WindowManagerDeps) {
 		this.tree = tree;
@@ -229,6 +231,10 @@ export class WindowManager implements Component {
 		return this.tree.panes().indexOf(id);
 	}
 
+	getBodyRows(id: PaneId): number {
+		return this.paneBodyRows.get(id) ?? this.bodyRows;
+	}
+
 	/** The component currently mounted in a pane, if any. */
 	component(id: PaneId): Component | undefined {
 		return this.deps.panes.get(id);
@@ -259,19 +265,37 @@ export class WindowManager implements Component {
 		const getViewRows = this.deps.getViewRows;
 		if (!getViewRows) return;
 		const available = Math.max(MIN_PANE_HEIGHT, getViewRows() - CHROME_ROWS_ESTIMATE);
-		this.bodyRows = Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, Math.floor(available / this.rowsNeeded(this.tree.root)) - TITLE_ROWS);
+		this.paneBodyRows.clear();
+		this.assignPaneRows(this.tree.root, available);
+		this.bodyRows = this.paneBodyRows.get(this.tree.panes()[0]!) ?? Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, available - TITLE_ROWS);
 		for (const [id, component] of this.deps.panes) {
 			if (id === "repl") continue;
-			if (component instanceof View) component.setViewportHeight(this.bodyRows);
-			else if (isBodyRowsAware(component)) component.setBodyRows(this.bodyRows);
+			const rows = this.getBodyRows(id);
+			if (component instanceof View) component.setViewportHeight(rows);
+			else if (isBodyRowsAware(component)) component.setBodyRows(rows);
 		}
 	}
 
-	private rowsNeeded(node: TreeNode): number {
-		if (typeof node === "string") return 1;
-		return node.dir === "h"
-			? node.children.reduce((sum, child) => sum + this.rowsNeeded(child), 0)
-			: Math.max(...node.children.map((child) => this.rowsNeeded(child)));
+	/** Assign total pane rows through the tree; vertical siblings share height. */
+	private assignPaneRows(node: TreeNode, totalRows: number): void {
+		if (typeof node === "string") {
+			this.paneBodyRows.set(node, Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, totalRows - TITLE_ROWS));
+			return;
+		}
+		if (node.dir === "v") {
+			for (const child of node.children) this.assignPaneRows(child, totalRows);
+			return;
+		}
+		const weightTotal = node.sizes.reduce((sum, size) => sum + size, 0) || node.children.length;
+		let remaining = totalRows;
+		for (let i = 0; i < node.children.length; i++) {
+			const slotsLeft = node.children.length - i;
+			const rows = i === node.children.length - 1
+				? remaining
+				: Math.max(MIN_PANE_HEIGHT, Math.floor((totalRows * (node.sizes[i] ?? 1)) / weightTotal));
+			this.assignPaneRows(node.children[i]!, rows);
+			remaining -= rows;
+		}
 	}
 
 	render(width: number): string[] {

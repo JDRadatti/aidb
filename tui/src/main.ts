@@ -14,8 +14,9 @@ import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import { AidbEditor, attachDropdownOverlay } from "./completion-overlay.ts";
 import { colors, createEditorTheme } from "./theme.ts";
-import { handleReplInput, refreshWatchPanes, type ReplContext, type ReplIO } from "./repl.ts";
+import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, type ReplIO } from "./repl.ts";
 import { SplitTree } from "./split-tree.ts";
+import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
 
 const terminal = new ProcessTerminal();
@@ -70,6 +71,7 @@ function wireSession(api: DebuggerAPI): void {
 	});
 
 	api.on("process", ({ name, systemProcessId }) => {
+		resetLivePanes(replCtx);
 		io.info(`Started ${name ?? "target"}${systemProcessId ? ` (pid ${systemProcessId})` : ""}`);
 		updateStatus();
 	});
@@ -77,11 +79,13 @@ function wireSession(api: DebuggerAPI): void {
 	api.on("stopped", ({ reason }) => {
 		io.info(`Stopped (${reason}).`);
 		updateStatus();
-		// Watches re-evaluate on every stop, like gdb's `display`.
-		refreshWatchPanes(replCtx);
+		// Live panes re-evaluate on every stop, like gdb's `display`.
+		refreshLivePanes(replCtx);
 	});
 
 	api.on("continued", () => updateStatus());
+
+	api.on("breakpoints-changed", () => updateStatus());
 
 	api.on("location", ({ file, line }) => {
 		if (file) io.info(`→ ${file}:${line}`);
@@ -119,6 +123,7 @@ async function resetDebugger(): Promise<DebuggerAPI> {
 	await dbg.cleanup();
 	dbg = createDebugger();
 	wireSession(dbg.api);
+	resetLivePanes(replCtx);
 	return dbg.api;
 }
 
@@ -164,12 +169,12 @@ editor.onSubmit = (text: string) => {
 };
 // The suggestion list renders as an overlay docked above the prompt instead
 // of inline rows, so opening/closing it never scrolls the document or leaves
-// a gap at the bottom of the screen. It floats over the status bar.
+// a gap at the bottom of the screen.
 attachDropdownOverlay(tui, editor);
 
 tui.addChild(windows);
-tui.addChild(statusBar);
 tui.addChild(editor);
+tui.addChild(statusBar);
 
 /**
  * The editor keeps focus permanently — panes never capture keys, so the
@@ -187,6 +192,13 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 		}
 		void shutdown();
 		return { consume: true };
+	}
+	if (matchesKey(data, "ctrl+up") || matchesKey(data, "ctrl+down")) {
+		const active = windows.component(windows.active);
+		if (active instanceof View) {
+			active.handleInput(data);
+			return { consume: true };
+		}
 	}
 
 	const api = dbg.api;

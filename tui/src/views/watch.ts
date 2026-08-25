@@ -8,6 +8,7 @@
 
 import { matchesKey } from "@earendil-works/pi-tui";
 import { View, type ViewOptions } from "../view.ts";
+import type { LivePane } from "../viz/types.ts";
 
 export interface WatchEntry {
 	expr: string;
@@ -21,7 +22,7 @@ export type WatchEvaluator = (expr: string) => Promise<string>;
 
 const HINT_LINES = ["watch is empty", "", "o: add expression   d: delete   enter: refresh"];
 
-export class WatchListView extends View {
+export class WatchListView extends View implements LivePane {
 	private entries: WatchEntry[] = [];
 	private evaluator: WatchEvaluator;
 	/** Non-empty while the inline add-prompt captures keys. */
@@ -61,6 +62,15 @@ export class WatchListView extends View {
 
 	async refreshAll(): Promise<void> {
 		await Promise.all(this.entries.map((_, index) => this.refreshEntry(index)));
+	}
+
+	reset(): void {
+		for (const entry of this.entries) {
+			entry.value = undefined;
+			entry.error = false;
+			entry.pending = true;
+		}
+		this.touch();
 	}
 
 	protected override capturingInput(): boolean {
