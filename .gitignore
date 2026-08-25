@@ -8,6 +8,9 @@ debugger-core/dist/
 # Compiled test program (gcc -g test/test.c)
 test/test
 /example
+results/
+test/bench/fixtures/bench-loop
+.gdb_history
 *.o
 
 # Planning notes / generated docs

@@ -15,6 +15,7 @@
 		"build": "npm run build --workspace @earendil-works/pi-debugger-core",
 		"test": "npm test --workspace @earendil-works/pi-debugger-core && npm test --workspace aidb-tui",
 		"dev": "npm run dev --workspace aidb-tui",
-		"start": "npm run dev"
+		"start": "npm run dev",
+		"bench": "bash scripts/bench.sh"
 	}
 }
