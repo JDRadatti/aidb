@@ -19,6 +19,7 @@ import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
 
+const traceDap = process.argv.includes("--trace-dap");
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
 
@@ -59,7 +60,7 @@ const io: ReplIO = {
 	error: (text) => addLine(colors.error(text)),
 };
 
-let dbg = createDebugger();
+let dbg = createDebugger({ traceDap });
 
 function wireSession(api: DebuggerAPI): void {
 	api.on("output", ({ category, output }) => {
@@ -100,6 +101,11 @@ function wireSession(api: DebuggerAPI): void {
 		}
 		updateStatus();
 	});
+
+	api.on("session:error", ({ error }) => {
+		io.error(error.message);
+		updateStatus();
+	});
 }
 
 wireSession(dbg.api);
@@ -121,7 +127,7 @@ function updateStatus(): void {
 
 async function resetDebugger(): Promise<DebuggerAPI> {
 	await dbg.cleanup();
-	dbg = createDebugger();
+	dbg = createDebugger({ traceDap });
 	wireSession(dbg.api);
 	resetLivePanes(replCtx);
 	return dbg.api;
@@ -136,6 +142,10 @@ async function shutdown(): Promise<void> {
 		await dbg.cleanup();
 	} finally {
 		tui.stop();
+		if (traceDap) {
+			const trace = dbg.dumpDapTrace();
+			if (trace) process.stderr.write(`\n--- DAP trace ---\n${trace}\n`);
+		}
 		process.exit(0);
 	}
 }

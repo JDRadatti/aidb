@@ -17,6 +17,7 @@ import type {
 	Variable,
 	DebuggerAPI,
 } from "./types.ts";
+import { CapabilityUnsupportedError, FrameNotFoundError, MemoryReadError } from "./errors.ts";
 
 /**
  * GDB commands that should be routed to DAP evaluate.
@@ -81,6 +82,8 @@ export function createDebuggerAPI(
 	let currentColumn = 0;
 	let activeThreadId = 1;
 	let started = false;
+	let recovering = false;
+	let lastTarget: { kind: "launch"; program: string; args: string[] } | { kind: "attach"; pid: number } | null = null;
 
 	/**
 	 * Per-stop observation state. Every "stopped" event bumps `stopSeq` and
@@ -108,11 +111,20 @@ export function createDebuggerAPI(
 	});
 	eventBus.on("continued", invalidateStopData);
 	eventBus.on("session:exited", invalidateStopData);
+	eventBus.on("gdb:exited", () => {
+		started = false;
+		void recoverFromGdbExit();
+	});
 
 	async function ensureStarted() {
 		if (!started) {
 			started = true;
-			await dapClient.start();
+			try {
+				await dapClient.start();
+			} catch (error) {
+				started = false;
+				throw error;
+			}
 		}
 	}
 
@@ -234,6 +246,24 @@ export function createDebuggerAPI(
 		activeThreadId = 1;
 	}
 
+	/** Restore a state changed optimistically before a DAP request. */
+	function rollbackState(previous: SessionState, expected: SessionState): void {
+		if (stateMachine.getState() !== expected) return;
+		if (stateMachine.forceState) stateMachine.forceState(previous);
+		else if (stateMachine.getState() !== previous) stateMachine.transition(previous);
+	}
+
+	async function requestWhileRunning(command: string, args: any): Promise<void> {
+		const previous = stateMachine.getState();
+		stateMachine.transition("running");
+		try {
+			await dapClient.sendRequest(command, args);
+		} catch (error) {
+			rollbackState(previous, "running");
+			throw error;
+		}
+	}
+
 	/**
 	 * DAP's setBreakpoints replaces the full breakpoint list for a file,
 	 * so every mutation must send the complete desired list for that file
@@ -248,6 +278,60 @@ export function createDebuggerAPI(
 		return Array.from(breakpoints.values())
 			.filter((bp) => bp.file === file)
 			.map((bp) => ({ line: bp.line, condition: bp.condition }));
+	}
+
+	async function rebindBreakpoints(): Promise<void> {
+		const files = [...new Set(Array.from(breakpoints.values()).map((bp) => bp.file).filter(Boolean))];
+		for (const file of files) {
+			const old = Array.from(breakpoints.values()).filter((bp) => bp.file === file);
+			const desired = desiredList(file);
+			const result = await dapClient.sendRequest("setBreakpoints", {
+				source: { path: file },
+				breakpoints: desired,
+			});
+			for (const bp of old) breakpoints.delete(bp.id);
+			for (const rb of result.breakpoints ?? []) {
+				const line = rb?.line ?? desired[0]?.line;
+				const source = old.find((bp) => bp.line === line);
+				if (!source || line === undefined) continue;
+				breakpoints.set(rb?.id ?? source.id, {
+					...source,
+					id: rb?.id ?? source.id,
+					line,
+					verified: rb?.verified ?? false,
+				});
+			}
+		}
+		notifyBreakpointsChanged();
+	}
+
+	async function recoverFromGdbExit(): Promise<void> {
+		if (recovering || !lastTarget) return;
+		recovering = true;
+		const target = lastTarget;
+		try {
+			beginRun();
+			await ensureStarted();
+			await rebindBreakpoints();
+			if (target.kind === "launch") {
+				await dapClient.prepareInferiorIo();
+				await dapClient.sendRequest("launch", {
+					program: target.program,
+					args: target.args,
+					gdb: true,
+					rights: "all",
+				});
+			} else {
+				await dapClient.sendRequest("attach", { pid: target.pid });
+			}
+			await dapClient.sendRequest("configurationDone");
+		} catch (error) {
+			const recoveryError = error instanceof Error ? error : new Error(String(error));
+			if (stateMachine.forceState) stateMachine.forceState("error", recoveryError);
+			else eventBus.emit("session:error", { error: recoveryError });
+		} finally {
+			recovering = false;
+		}
 	}
 
 	function sameCondition(a?: string, b?: string): boolean {
@@ -267,12 +351,15 @@ export function createDebuggerAPI(
 
 		const created: Breakpoint[] = [];
 		const responses = result.breakpoints ?? [];
-		responses.forEach((rb: any, i: number) => {
+		const desiredByLine = new Map(desired.map((bp) => [bp.line, bp]));
+		responses.forEach((rb: any) => {
+			const requested = desiredByLine.get(rb?.line);
+			if (!requested) return;
 			const nb: Breakpoint = {
-				id: rb?.id ?? i + 1,
+				id: rb?.id ?? requested.line,
 				file,
-				line: desired[i]?.line ?? rb?.line ?? 0,
-				condition: desired[i]?.condition,
+				line: requested.line,
+				condition: requested.condition,
 				verified: rb?.verified ?? false,
 			};
 			breakpoints.set(nb.id, nb);
@@ -280,7 +367,7 @@ export function createDebuggerAPI(
 		});
 
 		notifyBreakpointsChanged();
-		if (extra) return created[created.length - 1];
+		if (extra) return created.find((bp) => bp.line === extra.line);
 		return undefined;
 	}
 
@@ -293,56 +380,68 @@ export function createDebuggerAPI(
 
 	return {
 		async launch(program: string, args?: string[]) {
+			lastTarget = { kind: "launch", program, args: args ?? [] };
+			const previous = stateMachine.getState();
 			beginRun();
-			await ensureStarted();
-			// Install an exec-wrapper piping inferior stdout/stderr into a FIFO
-			// we drain ourselves: GDB's DAP drops/mangles program output.
-			await dapClient.prepareInferiorIo();
-			await dapClient.sendRequest("launch", {
-				program,
-				args: args ?? [],
-				gdb: true,
-				rights: "all",
-			});
-			await dapClient.sendRequest("configurationDone");
+			try {
+				await ensureStarted();
+				// Install an exec-wrapper piping inferior stdout/stderr into a FIFO
+				// we drain ourselves: GDB's DAP drops/mangles program output.
+				await dapClient.prepareInferiorIo();
+				await dapClient.sendRequest("launch", {
+					program,
+					args: args ?? [],
+					gdb: true,
+					rights: "all",
+				});
+				await dapClient.sendRequest("configurationDone");
+			} catch (error) {
+				rollbackState(previous, "launching");
+				throw error;
+			}
 			// State is auto-wired via event bus; DAP will send "stopped" or "running" events
 		},
 
 		async attach(pid: number) {
+			lastTarget = { kind: "attach", pid };
+			const previous = stateMachine.getState();
 			beginRun();
-			await ensureStarted();
-			await dapClient.sendRequest("attach", { pid });
-			await dapClient.sendRequest("configurationDone");
+			try {
+				await ensureStarted();
+				await dapClient.sendRequest("attach", { pid });
+				await dapClient.sendRequest("configurationDone");
+			} catch (error) {
+				rollbackState(previous, "launching");
+				throw error;
+			}
 		},
 
 		async detach() {
 			await dapClient.sendRequest("disconnect", { restart: false });
+			lastTarget = null;
 			stateMachine.transition("detached");
 		},
 
 		async quit() {
 			await dapClient.sendRequest("disconnect", { terminateDebuggee: true });
+			lastTarget = null;
 			stateMachine.transition("exited");
 		},
 
 		async continue() {
-			stateMachine.transition("running");
-			await dapClient.sendRequest("continue", { threadId: activeThreadId });
+			await requestWhileRunning("continue", { threadId: activeThreadId });
 		},
 
 		async stepOver() {
-			stateMachine.transition("running");
-			await dapClient.sendRequest("next", { threadId: activeThreadId });
+			await requestWhileRunning("next", { threadId: activeThreadId });
 		},
 
 		async stepInto() {
-			stateMachine.transition("running");
-			await dapClient.sendRequest("stepIn", { threadId: activeThreadId });
+			await requestWhileRunning("stepIn", { threadId: activeThreadId });
 		},
 
 		async stepOut() {
-			stateMachine.transition("running");
-			await dapClient.sendRequest("stepOut", { threadId: activeThreadId });
+			await requestWhileRunning("stepOut", { threadId: activeThreadId });
 		},
 
 		async setBreakpoint(file: string, line: number, condition?: string) {
@@ -430,7 +529,7 @@ export function createDebuggerAPI(
 			const frames = await getStackCached();
 			const frame = frames.find((f) => f.id === frameId);
 			if (!frame) {
-				throw new Error(`No frame ${frameId} in the current stack (${frames.length} frames).`);
+				throw new FrameNotFoundError(frameId, frames.length);
 			}
 			selectedFrameId = frameId;
 			if (frame.file) sourceFile = frame.file;
@@ -503,7 +602,7 @@ export function createDebuggerAPI(
 			const text = await this.evaluate(`x/${count}xb ${expression}`, "repl");
 			const { address, bytes } = parseXBytes(String(text ?? ""));
 			if (bytes.length === 0) {
-				throw new Error(`Could not read ${count} bytes at '${expression}'.`);
+				throw new MemoryReadError(count, expression);
 			}
 			return { address: address ?? expression, data: bytes };
 		},
@@ -511,7 +610,7 @@ export function createDebuggerAPI(
 		async disassemble(memoryReference: string, instructionCount: number): Promise<Instruction[]> {
 			await ensureStarted();
 			if (!capabilitiesSafe().supportsDisassembleRequest) {
-				throw new Error("This gdb DAP adapter does not advertise disassemble support.");
+				throw new CapabilityUnsupportedError("disassemble");
 			}
 			const result = await dapClient.sendRequest("disassemble", {
 				memoryReference,

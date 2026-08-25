@@ -5,6 +5,7 @@
 
 import type { DebuggerEventBus } from "./event-bus.ts";
 import type { SessionState } from "./types.ts";
+import { SessionStateError } from "./errors.ts";
 
 /**
  * Valid state transitions.
@@ -44,7 +45,7 @@ export class SessionStateMachine {
 	transition(newState: SessionState, data?: any): void {
 		const validTransitions = TRANSITIONS[this.state];
 		if (!validTransitions.includes(newState)) {
-			throw new Error(
+			throw new SessionStateError(
 				`Invalid state transition: ${this.state} -> ${newState}. Valid transitions: ${validTransitions.join(", ")}`,
 			);
 		}

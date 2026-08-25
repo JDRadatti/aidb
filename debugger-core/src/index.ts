@@ -34,8 +34,22 @@ export type {
 
 // Re-export classes
 export { DapClient } from "./dap-client.ts";
+export type { DapTraceEntry } from "./dap-client.ts";
 export { DebuggerEventBus } from "./event-bus.ts";
 export { SessionStateMachine } from "./session.ts";
+export {
+	DebuggerError,
+	DapTransportError,
+	DapProtocolError,
+	DapRequestError,
+	DapTimeoutError,
+	GdbExitedError,
+	SessionStateError,
+	CapabilityUnsupportedError,
+	FrameNotFoundError,
+	MemoryReadError,
+} from "./errors.ts";
+export type { DebuggerErrorCode } from "./errors.ts";
 
 /**
  * Create a debugger instance.
@@ -45,6 +59,8 @@ export function createDebugger(config: DapClientConfig = {}): {
 	api: DebuggerAPI;
 	cleanup: () => Promise<void>;
 	eventBus: DebuggerEventBus;
+	getDapTrace: () => import("./dap-client.ts").DapTraceEntry[];
+	dumpDapTrace: () => string;
 } {
 	const eventBus = new DebuggerEventBus();
 	const stateMachine = new SessionStateMachine(eventBus);
@@ -54,6 +70,8 @@ export function createDebugger(config: DapClientConfig = {}): {
 	return {
 		api,
 		eventBus,
+		getDapTrace: () => dapClient.getDapTrace(),
+		dumpDapTrace: () => dapClient.dumpDapTrace(),
 		cleanup: async () => {
 			try {
 				await dapClient.stop();
