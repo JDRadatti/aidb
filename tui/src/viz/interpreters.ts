@@ -9,13 +9,36 @@
  * inner resets, so these escapes are safe inside panes.
  */
 
-import type { BindingSnapshot, Interpreter, Rect, VarNode } from "./types.ts";
+import type { BindingSnapshot, InterleavedRow, Interpreter, Rect, VarNode } from "./types.ts";
+import { colors } from "../theme.ts";
 
 const CHANGED = "\x1b[33m";
 const RESET = "\x1b[0m";
+const KEYWORDS = new Set([
+	"alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue", "default", "delete", "do", "double", "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "namespace", "new", "noexcept", "not", "nullptr", "operator", "or", "private", "protected", "public", "register", "reinterpret_cast", "return", "short", "signed", "sizeof", "static", "static_cast", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
+]);
 
 function mark(changed: boolean, text: string): string {
 	return changed ? CHANGED + text + RESET : text;
+}
+
+function highlightCode(line: string): string {
+	if (/^\s*#/.test(line)) return colors.bold(colors.accent(line));
+	const token = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_]\w*\b)/g;
+	let result = "";
+	let offset = 0;
+	for (const match of line.matchAll(token)) {
+		const value = match[0];
+		const index = match.index ?? 0;
+		result += line.slice(offset, index);
+		if (value.startsWith("//") || value.startsWith("/*")) result += colors.muted(value);
+		else if (value.startsWith('"') || value.startsWith("'")) result += colors.success(value);
+		else if (/^\d/.test(value)) result += colors.warning(value);
+		else if (KEYWORDS.has(value)) result += colors.accent(value);
+		else result += value;
+		offset = index + value.length;
+	}
+	return result + line.slice(offset);
 }
 
 function errorLines(snap: BindingSnapshot): string[] {
@@ -44,20 +67,53 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 	if (snap.kind === "assembly") {
 		const instructions = snap.instructions ?? [];
 		if (instructions.length === 0) return ["waiting for data…"];
-		return instructions.map((instruction) => {
-			const marker = instruction.current || sameAddress(instruction.address, snap.currentAddress) ? ">" : " ";
-			const bytes = instruction.instructionBytes ? ` ${instruction.instructionBytes}` : "";
-			return `${marker} ${instruction.address.padEnd(18)}${bytes.padEnd(20)} ${instruction.instruction}`;
+		let currentSymbol: string | undefined;
+		const lines = instructions.map((instruction) => {
+			if (instruction.symbol) currentSymbol = instruction.symbol;
+			const current = instruction.current || sameAddress(instruction.address, snap.currentAddress);
+			const marker = current ? "▶" : " ";
+			const breakpoint = instruction.line === undefined ? undefined : snap.breakpoints?.find((candidate) => candidate.line === instruction.line);
+			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
+			const sourceLine = instruction.line === undefined ? "     " : String(instruction.line).padStart(5);
+			const symbol = currentSymbol ? `<${currentSymbol}>` : "";
+			return `${marker} ${breakpointMarker} ${sourceLine} ${instruction.address.padEnd(18)}${symbol.padEnd(20)} ${instruction.instruction}`;
 		});
+		return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 	}
 	const lines = snap.lines ?? [];
 	if (lines.length === 0) return ["waiting for data…"];
 	const start = snap.startLine ?? 1;
 	return lines.map((line, index) => {
 		const number = start + index;
-		const marker = number === snap.currentLine ? ">" : " ";
-		return `${marker} ${String(number).padStart(5)} | ${line}`;
+		const current = number === snap.currentLine;
+		const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === number);
+		const executionMarker = current ? "▶" : " ";
+		const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
+		const numberAndCode = `${String(number).padStart(5)} | `;
+		if (current) return `${colors.accent(`${executionMarker} ${breakpointMarker} ${numberAndCode}`)}${highlightCode(line)}`;
+		const gutter = breakpoint ? `${executionMarker} ${colors.error(breakpointMarker)} ${numberAndCode}` : `${executionMarker} ${breakpointMarker} ${numberAndCode}`;
+		return gutter + highlightCode(line);
 	});
+}
+
+export function renderInterleaved(snap: BindingSnapshot): string[] {
+	if (snap.error) return errorLines(snap);
+	const rows = snap.interleaved ?? [];
+	if (rows.length === 0) return ["waiting for data…"];
+	const lines = rows.map((row: InterleavedRow) => {
+		if (row.kind === "source") {
+			const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === row.line);
+			const marker = row.current ? "▶" : " ";
+			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
+			const prefix = `${marker} ${breakpointMarker} ${String(row.line).padStart(5)} | `;
+			return row.current ? colors.accent(prefix) + highlightCode(row.text) : prefix + highlightCode(row.text);
+		}
+		const instruction = row.instruction;
+		const symbol = instruction.symbol ? `<${instruction.symbol}>` : "";
+		const marker = instruction.current ? "▶" : " ";
+		return `${marker}       │ ${instruction.address.padEnd(18)}${symbol.padEnd(20)} ${instruction.instruction}`;
+	});
+	return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 }
 
 function sameAddress(left: string, right: string | undefined): boolean {
@@ -223,6 +279,7 @@ export const INTERPRETERS: Record<string, Interpreter> = {
 	lines: { id: "lines", title: "value lines", render: guarded((snap) => renderValueLines(snap)) },
 	text: { id: "text", title: "text", render: guarded((snap) => renderText(snap)) },
 	code: { id: "code", title: "code", render: guarded(renderCode) },
+	iasm: { id: "iasm", title: "interleaved assembly", render: guarded((snap) => renderInterleaved(snap)) },
 	"struct-tree": { id: "struct-tree", title: "struct tree", render: guarded(renderTree) },
 	sparkline: { id: "sparkline", title: "sparkline", render: guarded(renderSparkline) },
 	hexdump: { id: "hexdump", title: "hexdump", render: guarded(renderHexdump) },

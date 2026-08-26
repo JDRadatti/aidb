@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AssemblyBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, parseGdbNumber } from "../src/viz/bindings.ts";
+import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, parseGdbNumber } from "../src/viz/bindings.ts";
 import type { FetchCtx, VarNode } from "../src/viz/types.ts";
 
 function makeCtx(over: Partial<FetchCtx> = {}): FetchCtx {
@@ -172,19 +172,46 @@ describe("SourceBinding", () => {
 		assert.deepEqual(snap.lines, ["line 8", "line 9", "line 10", "line 11", "line 12"]);
 	});
 
-	it("reports missing source location", async () => {
+	it("includes only breakpoints inside the fetched source window", async () => {
+		const snap = await new SourceBinding(3).fetch(makeCtx({
+			getLocation: () => ({ file: "/tmp/example.c", line: 10 }),
+			readSource: async () => ["line 9", "line 10", "line 11"],
+			getBreakpoints: () => [
+				{ line: 8, verified: true },
+				{ line: 10, verified: true },
+				{ line: 12, verified: false },
+			],
+		}));
+
+		assert.deepEqual(snap.breakpoints, [{ line: 10, verified: true }]);
+	});
+
+	 it("reports missing source location", async () => {
 		const snap = await new SourceBinding().fetch(makeCtx({ getLocation: () => ({ file: null, line: 0 }) }));
 		assert.equal(snap.error, "no source location");
+	});
+
+	it("falls back to assembly when source is unavailable", async () => {
+		const snap = await new SourceBinding(3).fetch(makeCtx({
+			getLocation: () => ({ file: "./stdio-common/printf.c", line: 32 }),
+			readSource: async () => { throw new Error("ENOENT"); },
+			evaluateDetailed: async () => ({ result: "0x401126 <__printf+0>", variablesReference: 0, memoryReference: "0x401126" }),
+			disassemble: async () => [{ address: "0x401126", instruction: "push rbp", current: true }],
+		}));
+
+		assert.equal(snap.kind, "assembly");
+		assert.match(snap.info!, /Source unavailable/);
+		assert.equal(snap.instructions?.[0]?.instruction, "push rbp");
 	});
 });
 
 describe("AssemblyBinding", () => {
 	it("centers the window around the program counter", async () => {
-		let request: { reference: string; count: number } | undefined;
+		let request: { reference: string; count: number; offset?: number } | undefined;
 		const snap = await new AssemblyBinding(3).fetch(makeCtx({
 			evaluateDetailed: async () => ({ result: "0x401126 <main+0>", variablesReference: 0, memoryReference: "0x401126 <main+0>" }),
-			disassemble: async (reference, count) => {
-				request = { reference, count };
+			disassemble: async (reference, count, offset) => {
+				request = { reference, count, offset };
 				return Array.from({ length: count }, (_, index) => ({
 					address: `0x${(0x401076 + index * 16).toString(16)}`,
 					instruction: index === 11 ? "push %rbp" : "nop",
@@ -192,10 +219,61 @@ describe("AssemblyBinding", () => {
 			},
 		}));
 
-		assert.deepEqual(request, { reference: "0x401056", count: 87 });
+		assert.deepEqual(request, { reference: "0x4010ea", count: 97, offset: undefined });
 		assert.equal(snap.kind, "assembly");
 		assert.equal(snap.currentAddress, "0x401126");
-		assert.equal(snap.instructions?.[0]?.current, false);
-		assert.equal(snap.instructions?.[11]?.current, true);
+		assert.equal(snap.instructions?.[10]?.current, true);
 	});
+
+	it("retains recent instructions from the previous window", async () => {
+		const snap = await new AssemblyBinding(3).fetch(makeCtx({
+			evaluateDetailed: async () => ({ result: "0x401126 <main+0>", variablesReference: 0, memoryReference: "0x401126" }),
+			disassemble: async () => [
+				{ address: "0x401126", instruction: "current" },
+				{ address: "0x401127", instruction: "next" },
+			],
+		}), {
+			kind: "assembly",
+			instructions: [
+				{ address: "0x401116", instruction: "previous" },
+				{ address: "0x401126", instruction: "old current" },
+			],
+		});
+
+		assert.deepEqual(snap.instructions?.map((instruction) => instruction.instruction), ["previous", "current", "next"]);
+		assert.equal(snap.instructions?.[1]?.current, true);
+	});
+});
+
+describe("InterleavedBinding", () => {
+	it("groups mapped instructions beneath their source lines", async () => {
+		const snap = await new InterleavedBinding(3, 3).fetch(makeCtx({
+			getLocation: () => ({ file: "/tmp/example.c", line: 12 }),
+			readSource: async () => ["line 11", "line 12", "line 13"],
+			evaluateDetailed: async () => ({ result: "0x401127", variablesReference: 0, memoryReference: "0x401127" }),
+			disassemble: async () => [
+				{ address: "0x401126", symbol: "main", instruction: "mov", line: 11 },
+				{ address: "0x401127", symbol: "main", instruction: "inc", line: 12, current: false },
+				{ address: "0x401128", symbol: "main", instruction: "ret", line: 13 },
+			],
+		}));
+
+		assert.equal(snap.kind, "interleaved");
+		assert.deepEqual(snap.interleaved?.map((row) => row.kind), ["source", "instruction", "source", "instruction", "source", "instruction"]);
+		assert.equal(snap.interleaved?.[1]?.kind, "instruction");
+	});
+
+	it("falls back to assembly rows when source is unavailable", async () => {
+		const snap = await new InterleavedBinding(3, 3).fetch(makeCtx({
+			getLocation: () => ({ file: "./stdio-common/printf.c", line: 32 }),
+			readSource: async () => { throw new Error("ENOENT"); },
+			evaluateDetailed: async () => ({ result: "0x401126 <__printf+0>", variablesReference: 0, memoryReference: "0x401126" }),
+			disassemble: async () => [{ address: "0x401126", instruction: "push rbp", current: true }],
+		}));
+
+		assert.equal(snap.kind, "interleaved");
+		assert.match(snap.info!, /showing assembly only/);
+		assert.deepEqual(snap.interleaved?.map((row) => row.kind), ["instruction"]);
+	});
+
 });

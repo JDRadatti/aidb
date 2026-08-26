@@ -4,7 +4,7 @@
  * so panes can display them and retry on the next stop instead of throwing.
  */
 
-import type { AssemblyLine, Binding, BindingSnapshot, FetchCtx, VarNode } from "./types.ts";
+import type { AssemblyLine, Binding, BindingSnapshot, FetchCtx, InterleavedRow, VarNode } from "./types.ts";
 
 /** Parse a gdb value string ("42", "0x10", "3.5e2", "100 'd'") to a number. */
 export function parseGdbNumber(text: string): number | null {
@@ -226,14 +226,27 @@ export class SourceBinding implements Binding {
 	async fetch(ctx: FetchCtx): Promise<BindingSnapshot> {
 		const location = ctx.getLocation?.();
 		if (!location?.file || location.line < 1) return { kind: this.kind, error: "no source location" };
-		if (!ctx.readSource) return { kind: this.kind, error: "source reading is unavailable" };
+		if (!ctx.readSource) {
+			const assembly = await new AssemblyBinding(this.lineCount).fetch(ctx);
+			return assembly.error
+				? { kind: this.kind, error: "source reading and disassembly are unavailable" }
+				: { ...assembly, info: `Source unavailable for ${location.file}; showing assembly only` };
+		}
 		const before = Math.floor((this.lineCount - 1) / 2);
 		const startLine = Math.max(1, location.line - before);
 		try {
 			const lines = await ctx.readSource(location.file, startLine, this.lineCount);
-			return { kind: this.kind, file: location.file, startLine, currentLine: location.line, lines };
+			const breakpoints = ctx.getBreakpoints?.().filter((breakpoint) => breakpoint.line >= startLine && breakpoint.line < startLine + lines.length);
+			return { kind: this.kind, file: location.file, startLine, currentLine: location.line, lines, breakpoints };
 		} catch (error) {
-			return { kind: this.kind, error: message(error) };
+			const assembly = await new AssemblyBinding(this.lineCount).fetch(ctx);
+			if (!assembly.error) {
+				return {
+					...assembly,
+					info: `Source unavailable for ${location.file}; showing assembly only`,
+				};
+			}
+			return { kind: this.kind, error: `source unavailable for ${location.file}: ${message(error)}` };
 		}
 	}
 }
@@ -242,10 +255,11 @@ export class SourceBinding implements Binding {
 export class AssemblyBinding implements Binding {
 	readonly kind = "assembly" as const;
 	readonly instructionCount: number;
-	private static readonly buffer = 10;
+	private readonly buffer: number;
 
-	constructor(instructionCount = 24) {
+	constructor(instructionCount = 24, buffer = 10) {
 		this.instructionCount = instructionCount;
+		this.buffer = buffer;
 	}
 
 	identity(): string {
@@ -256,29 +270,46 @@ export class AssemblyBinding implements Binding {
 		return "assembly";
 	}
 
-	async fetch(ctx: FetchCtx): Promise<BindingSnapshot> {
+	async fetch(ctx: FetchCtx, previous?: BindingSnapshot): Promise<BindingSnapshot> {
 		if (!ctx.disassemble) return { kind: this.kind, error: "disassembly is unavailable" };
 		let pc: string;
 		try {
 			const info = await ctx.evaluateDetailed("$pc");
-			pc = parseAddress(info.memoryReference ?? info.result);
+			pc = parseAddress(info.memoryReference ?? "") || parseAddress(info.result);
+			if (!pc) pc = parseAddress(await ctx.evaluate("p/x (void*)$pc", "repl"));
 			if (!pc) return { kind: this.kind, error: "could not resolve $pc" };
-			const before = Math.floor((this.instructionCount - 1) / 2) + AssemblyBinding.buffer;
-			// Leave extra byte room before the requested instruction count; x86
-			// instructions are variable length, so a nominal instruction-sized
-			// offset can otherwise leave $pc just beyond the returned block.
-			const start = addressBefore(pc, before + 2);
-			const fetched = await ctx.disassemble(start, this.instructionCount + AssemblyBinding.buffer * 2 + 64);
-			const currentIndex = fetched.findIndex((instruction: AssemblyLine) => sameAddress(instruction.address, pc));
-			const first = currentIndex < 0 ? 0 : Math.max(0, currentIndex - before);
-			const instructions = fetched.slice(first, first + this.instructionCount + AssemblyBinding.buffer * 2);
+			// Start before the PC so the DAP response includes preceding
+			// instructions. GDB's DAP adapter does not accept negative instruction
+			// offsets, but it can disassemble from an earlier memory reference.
+			const backBytes = BigInt(this.buffer * 6);
+			const pcValue = BigInt(pc);
+			const startAddress = pcValue > backBytes ? `0x${(pcValue - backBytes).toString(16)}` : pc;
+			const fetched = await ctx.disassemble(startAddress, this.instructionCount + this.buffer * 3 + 64);
+			const fetchedAddresses = new Set(fetched.map((instruction) => parseAddress(instruction.address)));
+			const prior = (previous?.instructions ?? []).filter((instruction) => !fetchedAddresses.has(parseAddress(instruction.address)));
+			const seen = new Set<string>();
+			const combined = [...prior, ...fetched].filter((instruction) => {
+				const address = parseAddress(instruction.address);
+				if (seen.has(address)) return false;
+				seen.add(address);
+				return true;
+			});
+			const currentIndex = combined.findIndex((instruction: AssemblyLine) => sameAddress(instruction.address, pc));
+			const first = currentIndex < 0 ? 0 : Math.max(0, currentIndex - this.buffer);
+			const instructions = combined.slice(first, first + this.instructionCount + this.buffer * 2);
+			let currentSymbol = parseSymbol(info.result);
 			return {
 				kind: this.kind,
 				currentAddress: pc,
-				instructions: instructions.map((instruction: AssemblyLine) => ({
-					...instruction,
-					current: sameAddress(instruction.address, pc),
-				})),
+				breakpoints: ctx.getBreakpoints?.(),
+				instructions: instructions.map((instruction: AssemblyLine) => {
+					if (instruction.symbol) currentSymbol = instruction.symbol;
+					return {
+						...instruction,
+						symbol: instruction.symbol ?? currentSymbol,
+						current: sameAddress(instruction.address, pc),
+					};
+				}),
 			};
 		} catch (error) {
 			return { kind: this.kind, error: message(error) };
@@ -286,10 +317,91 @@ export class AssemblyBinding implements Binding {
 	}
 }
 
+/** Source lines with the instructions mapped to each line directly beneath them. */
+export class InterleavedBinding implements Binding {
+	readonly kind = "interleaved" as const;
+	private lineCount: number;
+	readonly instructionCount: number;
+
+	constructor(lineCount = 18, instructionCount = 48) {
+		this.lineCount = lineCount;
+		this.instructionCount = instructionCount;
+	}
+
+	setViewportHeight(rows: number): boolean {
+		const next = Math.max(3, Math.floor(rows / 2));
+		if (next === this.lineCount) return false;
+		this.lineCount = next;
+		return true;
+	}
+
+	identity(): string {
+		return `iasm:${this.lineCount}:${this.instructionCount}`;
+	}
+
+	describe(): string {
+		return "interleaved assembly";
+	}
+
+	async fetch(ctx: FetchCtx, previous?: BindingSnapshot): Promise<BindingSnapshot> {
+		const previousAssembly = previous?.interleaved
+			? { kind: "assembly" as const, instructions: previous.interleaved.filter((row) => row.kind === "instruction").map((row) => row.instruction) }
+			: undefined;
+		const assembly = await new AssemblyBinding(this.instructionCount, this.lineCount).fetch(ctx, previousAssembly);
+		if (assembly.error) return { kind: this.kind, error: assembly.error };
+		const location = ctx.getLocation?.();
+		if (!location?.file || location.line < 1) return { kind: this.kind, error: "no source location" };
+		if (!ctx.readSource) return { kind: this.kind, error: "source reading is unavailable" };
+		const currentInstruction = assembly.instructions?.find((instruction) => instruction.current);
+		const currentLine = currentInstruction?.line ?? location.line;
+		const before = Math.floor((this.lineCount - 1) / 2);
+		const startLine = Math.max(1, currentLine - before);
+		let lines: string[];
+		try {
+			lines = await ctx.readSource(location.file, startLine, this.lineCount);
+		} catch (error) {
+			return {
+				kind: this.kind,
+				currentAddress: assembly.currentAddress,
+				breakpoints: assembly.breakpoints,
+				interleaved: (assembly.instructions ?? []).map((instruction) => ({ kind: "instruction" as const, instruction })),
+				info: `Source unavailable for ${location.file}; showing assembly only`,
+			};
+		}
+		const endLine = startLine + lines.length - 1;
+		const byLine = new Map<number, AssemblyLine[]>();
+		const unmapped: AssemblyLine[] = [];
+		for (const instruction of assembly.instructions ?? []) {
+			if (instruction.line === undefined || instruction.line < startLine || instruction.line > endLine) unmapped.push(instruction);
+			else byLine.set(instruction.line, [...(byLine.get(instruction.line) ?? []), instruction]);
+		}
+		const rows: InterleavedRow[] = [];
+		for (const [index, text] of lines.entries()) {
+			const line = startLine + index;
+			rows.push({ kind: "source", line, text, current: line === currentLine });
+			for (const instruction of byLine.get(line) ?? []) rows.push({ kind: "instruction", instruction });
+		}
+		for (const instruction of unmapped) rows.push({ kind: "instruction", instruction });
+		return {
+			kind: this.kind,
+			file: location.file,
+			startLine,
+			currentLine,
+			currentAddress: assembly.currentAddress,
+			breakpoints: ctx.getBreakpoints?.().filter((breakpoint) => breakpoint.line >= startLine && breakpoint.line <= endLine),
+			interleaved: rows,
+		};
+	}
+}
+
+function parseSymbol(value: string): string | undefined {
+	return value.match(/<([^>]+)>/)?.[1];
+}
+
 /** Strip GDB's symbolic suffix (`0x... <func+N>`) before DAP disassembly. */
 function parseAddress(value: string): string {
 	const match = value.trim().match(/0[xX][0-9a-fA-F]+/);
-	return match?.[0] ?? value.trim().split(/\s+/, 1)[0]!;
+	return match?.[0] ?? "";
 }
 
 function sameAddress(left: string, right: string): boolean {
@@ -297,15 +409,6 @@ function sameAddress(left: string, right: string): boolean {
 		return BigInt(parseAddress(left)) === BigInt(parseAddress(right));
 	} catch {
 		return parseAddress(left).toLowerCase() === parseAddress(right).toLowerCase();
-	}
-}
-
-function addressBefore(address: string, instructions: number): string {
-	try {
-		const value = BigInt(parseAddress(address));
-		return `0x${(value - BigInt(instructions * 16)).toString(16)}`;
-	} catch {
-		return address;
 	}
 }
 

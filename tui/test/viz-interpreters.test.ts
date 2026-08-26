@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { INTERPRETERS, renderCode, renderHexdump, renderSparkline, renderTable, renderTree } from "../src/viz/interpreters.ts";
+import { INTERPRETERS, renderCode, renderHexdump, renderInterleaved, renderSparkline, renderTable, renderTree } from "../src/viz/interpreters.ts";
 import type { BindingSnapshot, Rect, VarNode } from "../src/viz/types.ts";
 
 const WIDE: Rect = { width: 100, height: 24 };
@@ -45,19 +45,103 @@ describe("renderHexdump", () => {
 	});
 });
 
-describe("renderCode", () => {
+	describe("renderCode", () => {
 	it("renders source lines with a current-line marker", () => {
 		const lines = renderCode({ kind: "source", file: "example.c", startLine: 9, currentLine: 10, lines: ["int main()", "return 0;"] }, undefined, WIDE);
-		assert.deepEqual(lines, ["      9 | int main()", ">    10 | return 0;"]);
+		assert.match(lines[0]!, /^        9 \| \x1b\[36mint\x1b\[0m main\(\)$/);
+		assert.match(lines[1]!, /^\x1b\[36m▶      10 \| \x1b\[0m\x1b\[36mreturn\x1b\[0m \x1b\[33m0\x1b\[0m;$/);
+	});
+
+	it("renders aligned verified and pending breakpoint markers", () => {
+		const lines = renderCode({
+			kind: "source",
+			startLine: 9,
+			lines: ["int main()", "return 0;", "done();"],
+			breakpoints: [{ line: 9, verified: true }, { line: 11, verified: false }],
+		}, undefined, WIDE);
+
+		assert.match(lines[0]!, /\x1b\[31m●\x1b\[0m/);
+		assert.match(lines[0]!, /●\x1b\[0m     9 \| \x1b\[36mint\x1b\[0m main\(\)/);
+		assert.match(lines[2]!, /\x1b\[31m○\x1b\[0m/);
+		assert.match(lines[2]!, /○\x1b\[0m    11 \| done\(\)/);
+	});
+
+	it("highlights conservative C/C++ syntax without changing source text", () => {
+		const [line] = renderCode({
+			kind: "source",
+			startLine: 1,
+			lines: ['int answer = 42; // return "unchanged"'],
+		}, undefined, WIDE);
+
+		assert.match(line!, /\x1b\[36mint\x1b\[0m answer = \x1b\[33m42\x1b\[0m;/);
+		assert.match(line!, /\x1b\[90m\/\/ return "unchanged"\x1b\[0m/);
 	});
 
 	it("renders assembly instructions with a current-PC marker", () => {
 		const lines = renderCode({
 			kind: "assembly",
 			currentAddress: "0x401126 <main+0>",
-			instructions: [{ address: "0X401126", instruction: "push %rbp", current: false }],
+			instructions: [{ address: "0X401126", symbol: "main", instructionBytes: "55", instruction: "push %rbp", line: 12, current: false }],
 		}, undefined, WIDE);
-		assert.match(lines[0]!, /^> 0[Xx]401126\s+push %rbp/);
+		assert.match(lines[0]!, /^▶      12 0[Xx]401126\s+<main>\s+push %rbp/);
+	});
+
+	it("keeps the assembly source-line column aligned when debug info is missing", () => {
+		const lines = renderCode({
+			kind: "assembly",
+			instructions: [
+				{ address: "0x401126", instruction: "push %rbp", line: 12, current: true },
+				{ address: "0x401127", instruction: "nop" },
+			],
+			breakpoints: [{ line: 12, verified: true }],
+		}, undefined, WIDE);
+
+		assert.match(lines[0]!, /^▶ ●    12 0x401126/);
+		assert.match(lines[1]!, /^          0x401127/);
+	});
+
+	it("renders the function symbol across instructions in the same function", () => {
+		const lines = renderCode({
+			kind: "assembly",
+			instructions: [
+				{ address: "0x401126", symbol: "main", instructionBytes: "55", instruction: "push %rbp" },
+				{ address: "0x401127", instructionBytes: "4889e5", instruction: "mov %rbp,%rsp" },
+			],
+		}, undefined, WIDE);
+
+		assert.match(lines[0]!, /<main>\s+push %rbp/);
+		assert.match(lines[1]!, /<main>\s+mov %rbp,%rsp/);
+		assert.doesNotMatch(lines[0]!, /55/);
+	});
+
+	it("renders source lines with mapped instructions beneath them", () => {
+		const lines = renderInterleaved({
+			kind: "interleaved",
+			breakpoints: [{ line: 12, verified: true }],
+			interleaved: [
+				{ kind: "source", line: 11, text: "int x = 1;", current: false },
+				{ kind: "instruction", instruction: { address: "0x401126", symbol: "main", instruction: "mov", current: false } },
+				{ kind: "source", line: 12, text: "x++;", current: true },
+				{ kind: "instruction", instruction: { address: "0x401127", symbol: "main", instruction: "inc", current: true } },
+			],
+		}, undefined, WIDE);
+
+		assert.match(lines[0]!, /11 \|/);
+		assert.match(lines[0]!, /int.*x.*=.*1/);
+		assert.match(lines[1]!, /│ 0x401126\s+<main>\s+mov/);
+		assert.match(lines[2]!.replace(/\x1b\[[0-9;]*m/g, ""), /▶ ●\s+12 \| x\+\+;/);
+		assert.match(lines[3]!, /▶\s+│ 0x401127/);
+	});
+
+	it("renders a notice above assembly when source is unavailable", () => {
+		const lines = renderInterleaved({
+			kind: "interleaved",
+			info: "Source unavailable for ./stdio-common/printf.c; showing assembly only",
+			interleaved: [{ kind: "instruction", instruction: { address: "0x401126", instruction: "push rbp", current: true } }],
+		}, undefined, WIDE);
+
+		assert.match(lines[0]!.replace(/\x1b\[[0-9;]*m/g, ""), /^i Source unavailable/);
+		assert.match(lines[1]!, /▶\s+│ 0x401126/);
 	});
 });
 
@@ -140,6 +224,6 @@ describe("interpreter registry", () => {
 	});
 
 	it("exposes the built-in set for the /win pick menu", () => {
-		assert.deepEqual(Object.keys(INTERPRETERS).sort(), ["code", "hexdump", "lines", "sparkline", "struct-tree", "table", "text"]);
+		assert.deepEqual(Object.keys(INTERPRETERS).sort(), ["code", "hexdump", "iasm", "lines", "sparkline", "struct-tree", "table", "text"]);
 	});
 });
