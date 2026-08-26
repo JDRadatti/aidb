@@ -24,6 +24,8 @@ export class LivePaneView extends View implements LivePane {
 	private generation = 0;
 	/** Set when refreshAll is requested mid-fetch; drains one extra fetch. */
 	private refetch = false;
+	/** Keep the first assembly location centered through the initial pane resize. */
+	private centerAssemblyOnResize = false;
 
 	constructor(binding: Binding, interpreterId: string, fetchCtx: FetchCtx, options: ViewOptions = {}) {
 		super(options.id ?? "live", { ...options, title: options.title ?? LivePaneView.titleFor(binding, interpreterId) });
@@ -59,8 +61,21 @@ export class LivePaneView extends View implements LivePane {
 		this.binding.reset?.();
 		this.snap = undefined;
 		this.prevSnap = undefined;
+		this.centerAssemblyOnResize = false;
 		this.refetch = this.fetching;
 		this.touch();
+	}
+
+	override setViewportHeight(rows: number): void {
+		const changed = rows !== this.getViewportHeight();
+		super.setViewportHeight(rows);
+		if (this.binding.setViewportHeight?.(rows)) void this.refreshAll();
+		if (!changed || !this.centerAssemblyOnResize || (this.snap?.kind !== "assembly" && this.snap?.kind !== "interleaved")) return;
+		const current = this.snap.kind === "assembly"
+			? this.snap.instructions?.findIndex((instruction) => instruction.current) ?? -1
+			: this.snap.interleaved?.findIndex((row) => row.kind === "instruction" && row.instruction.current) ?? -1;
+		if (current >= 0) this.centerCursor(current);
+		this.centerAssemblyOnResize = false;
 	}
 
 	async refreshAll(): Promise<void> {
@@ -74,12 +89,17 @@ export class LivePaneView extends View implements LivePane {
 			const next = await this.binding.fetch(this.fetchCtx, this.snap);
 			if (generation === this.generation) {
 				this.prevSnap = this.snap;
-				this.snap = next;
-				if (next.kind === "assembly") {
-					const current = next.instructions?.findIndex((instruction) => instruction.current) ?? -1;
-					if (current >= 0) this.setCursor(current);
+					this.snap = next;
+					this.touch();
+					if (next.kind === "assembly" || next.kind === "interleaved") {
+						const current = next.kind === "assembly"
+							? next.instructions?.findIndex((instruction) => instruction.current) ?? -1
+							: next.interleaved?.findIndex((row) => row.kind === "instruction" && row.instruction.current) ?? -1;
+						if (current >= 0) {
+							this.centerCursor(current);
+							this.centerAssemblyOnResize = true;
+						}
 				}
-				this.touch();
 			}
 		} catch (error) {
 			// Bindings promise not to throw; keep the pane alive regardless.

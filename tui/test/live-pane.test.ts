@@ -6,7 +6,8 @@ import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
 import { LivePaneView } from "../src/views/live-pane.ts";
 import { WatchListView } from "../src/views/watch.ts";
-import { MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding } from "../src/viz/bindings.ts";
+import { InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding } from "../src/viz/bindings.ts";
+import type { BindingSnapshot } from "../src/viz/types.ts";
 
 function makeContext(api: Record<string, unknown> = {}) {
 	const messages: Array<{ kind: string; text: string }> = [];
@@ -49,6 +50,8 @@ describe("parseLoadSpec", () => {
 		assert.equal(parseLoadSpec("plot hp")?.interpreterId, "sparkline");
 		assert.ok(parseLoadSpec("tree player")?.binding instanceof TreeBinding);
 		assert.equal(parseLoadSpec("tree player")?.interpreterId, "struct-tree");
+		assert.ok(parseLoadSpec("iasm")?.binding instanceof InterleavedBinding);
+		assert.equal(parseLoadSpec("iasm")?.interpreterId, "iasm");
 	});
 
 	it("keeps multi-word expressions intact and rejects incomplete specs", () => {
@@ -108,6 +111,87 @@ describe("LivePaneView", () => {
 		assert.match(after, /no samples yet/);
 		assert.notEqual(before, after);
 		assert.ok(!view.setInterpreter("nope"));
+	});
+
+	it("centers the current assembly instruction on the first refresh", async () => {
+		const instructions = Array.from({ length: 40 }, (_, index) => ({
+			address: `0x${(0x4000 + index).toString(16)}`,
+			instruction: "nop",
+			current: index === 11,
+		}));
+		const view = new LivePaneView({
+			kind: "assembly",
+			identity: () => "test-assembly",
+			describe: () => "assembly",
+			fetch: async (): Promise<BindingSnapshot> => ({ kind: "assembly", instructions }),
+		}, "code", {} as never, { viewportHeight: 8 });
+
+		await view.refreshAll();
+		const lines = view.render(80);
+		assert.equal(lines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
+		for (const [index, instruction] of instructions.entries()) instruction.current = index === 28;
+		await view.refreshAll();
+		const movedLines = view.render(80);
+		assert.equal(movedLines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(movedLines));
+	});
+
+	it("recenters the initial assembly instruction after the pane gets resized", async () => {
+		const instructions = Array.from({ length: 40 }, (_, index) => ({
+			address: `0x${(0x4000 + index).toString(16)}`,
+			instruction: "nop",
+			current: index === 11,
+		}));
+		const view = new LivePaneView({
+			kind: "assembly",
+			identity: () => "test-assembly-resize",
+			describe: () => "assembly",
+			fetch: async (): Promise<BindingSnapshot> => ({ kind: "assembly", instructions }),
+		}, "code", {} as never);
+
+		await view.refreshAll();
+		view.setViewportHeight(8);
+		const lines = view.render(80);
+		assert.equal(lines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
+	});
+
+	it("refetches interleaved data with a larger source window after resize", async () => {
+		const requestedLines: number[] = [];
+		const binding = new InterleavedBinding(6, 3);
+		const ctx = makeContext({
+			sourceFile: "/tmp/example.c",
+			currentLine: 12,
+			readSource: async (_file: string, _start: number, count: number) => {
+				requestedLines.push(count);
+				return Array.from({ length: count }, () => "source");
+			},
+			evaluateDetailed: async () => ({ result: "0x401126", variablesReference: 0, memoryReference: "0x401126" }),
+			disassemble: async () => [{ address: "0x401126", instruction: "nop", line: 12 }],
+		});
+		const fetchCtx = {
+			evaluate: async () => "0x401126",
+			evaluateDetailed: async () => ({ result: "0x401126", variablesReference: 0, memoryReference: "0x401126" }),
+			getVariableChildren: async () => [],
+			readMemory: async () => ({ address: "0x0", data: new Uint8Array() }),
+			getLocation: () => ({ file: "/tmp/example.c", line: 12 }),
+			readSource: async (_file: string, _start: number, count: number) => {
+				requestedLines.push(count);
+				return Array.from({ length: count }, () => "source");
+			},
+			disassemble: async () => [{ address: "0x401126", instruction: "nop", line: 12 }],
+		};
+		const view = new LivePaneView({
+			kind: "interleaved",
+			identity: () => binding.identity(),
+			describe: () => binding.describe(),
+			setViewportHeight: (rows) => binding.setViewportHeight?.(rows) ?? false,
+			fetch: (_ctx, previous) => binding.fetch(fetchCtx, previous),
+		}, "iasm", fetchCtx, { viewportHeight: 8 });
+
+		await view.refreshAll();
+		view.setViewportHeight(20);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		assert.deepEqual(requestedLines, [6, 10]);
 	});
 
 	it("coalesces refresh requests that land mid-fetch", async () => {

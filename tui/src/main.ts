@@ -18,6 +18,7 @@ import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, ty
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
+import { ActivitySpinner } from "./spinner.ts";
 
 const traceDap = process.argv.includes("--trace-dap");
 const terminal = new ProcessTerminal();
@@ -32,6 +33,7 @@ setKeybindings(
 
 const transcript = new Container();
 const statusBar = new Text("", 0, 0);
+const spinner = new ActivitySpinner(tui, transcript);
 
 /**
  * The window system is being proven in isolation: blank panes render as
@@ -86,11 +88,15 @@ function wireSession(api: DebuggerAPI): void {
 
 	api.on("continued", () => updateStatus());
 
-	api.on("breakpoints-changed", () => updateStatus());
+	api.on("breakpoints-changed", () => {
+		updateStatus();
+		refreshLivePanes(replCtx);
+	});
 
 	api.on("location", ({ file, line }) => {
 		if (file) io.info(`→ ${file}:${line}`);
 		updateStatus();
+		if (file && line > 0) refreshLivePanes(replCtx);
 	});
 
 	api.on("session:exited", ({ exitCode }) => {
@@ -157,6 +163,7 @@ const replCtx: ReplContext = {
 	requestRender: () => tui.requestRender(),
 	io,
 	windows,
+	spinner,
 };
 
 async function submit(raw: string): Promise<void> {
@@ -221,19 +228,19 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 	};
 
 	if (matchesKey(data, "f5")) {
-		if (guard()) void api.continue().catch((e) => io.error(String(e.message ?? e)));
+		if (guard()) void spinner.run("continuing", () => api.continue()).catch((e) => io.error(String(e.message ?? e)));
 		return { consume: true };
 	}
 	if (matchesKey(data, "f10")) {
-		if (guard()) void api.stepOver().catch((e) => io.error(String(e.message ?? e)));
+		if (guard()) void spinner.run("stepping over", () => api.stepOver()).catch((e) => io.error(String(e.message ?? e)));
 		return { consume: true };
 	}
 	if (matchesKey(data, "f11")) {
-		if (guard()) void api.stepInto().catch((e) => io.error(String(e.message ?? e)));
+		if (guard()) void spinner.run("stepping into", () => api.stepInto()).catch((e) => io.error(String(e.message ?? e)));
 		return { consume: true };
 	}
 	if (matchesKey(data, "shift+f11")) {
-		if (guard()) void api.stepOut().catch((e) => io.error(String(e.message ?? e)));
+		if (guard()) void spinner.run("stepping out", () => api.stepOut()).catch((e) => io.error(String(e.message ?? e)));
 		return { consume: true };
 	}
 	return undefined;

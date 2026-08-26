@@ -7,9 +7,10 @@ import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
 import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView, type WatchEvaluator } from "./views/watch.ts";
-import { AssemblyBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
+import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
+import type { ActivitySpinner } from "./spinner.ts";
 
 export interface ReplIO {
 	line(text: string): void;
@@ -26,6 +27,11 @@ export interface ReplContext {
 	requestRender(): void;
 	io: ReplIO;
 	windows: WindowManager;
+	spinner?: ActivitySpinner;
+}
+
+function withActivity<T>(ctx: ReplContext, label: string, operation: () => Promise<T>): Promise<T> {
+	return ctx.spinner ? ctx.spinner.run(label, operation) : operation();
 }
 
 const HELP = [
@@ -39,10 +45,13 @@ const HELP = [
 	"  continue                    resume execution (F5, alias: c)",
 	"  next                        step over (F10, alias: n)",
 	"  step                        step into (F11, alias: s)",
+	"  si                          step one machine instruction (GDB alias: stepi)",
 	"  finish                      step out (Shift+F11)",
 	"  bt                          backtrace (aliases: backtrace, where)",
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  info locals | info args     variables and arguments of the current frame",
+	"  set disassembly-flavor intel|att   choose x86 Intel or AT&T syntax",
+	"  /win load <pane> iasm      source lines with mapped assembly beneath them",
 	"  /watch <expr>               pin an expression to a live watch pane across stops",
 	"  /win load <pane> <spec>     bind a live visualizer: regs · mem &x · plot n · tree s · source · asm",
 	"",
@@ -116,6 +125,15 @@ function resolveProgram(p: string): string {
 	if (p === "~") return os.homedir();
 	if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
 	return path.resolve(process.cwd(), p);
+}
+
+function sourcePathKey(file: string): string {
+	try {
+		const pathValue = file.startsWith("file://") ? decodeURIComponent(new URL(file).pathname) : file;
+		return path.normalize(path.resolve(pathValue));
+	} catch {
+		return path.normalize(file);
+	}
 }
 
 function cwdHint(io: ReplIO): void {
@@ -203,6 +221,10 @@ export function parseLoadSpec(spec: string): { binding: Binding; interpreterId: 
 		case "disasm":
 			if (argument) return undefined;
 			return { binding: new AssemblyBinding(), interpreterId: "code" };
+		case "iasm":
+		case "interleave":
+			if (argument) return undefined;
+			return { binding: new InterleavedBinding(), interpreterId: "iasm" };
 		default:
 			return undefined;
 	}
@@ -219,6 +241,13 @@ function makeFetchCtx(ctx: ReplContext): FetchCtx {
 		evaluate: (expression, context) => ctx.getApi().evaluate(expression, context ?? "watch"),
 		evaluateDetailed: (expression) => ctx.getApi().evaluateDetailed(expression),
 		getLocation: () => ({ file: ctx.getApi().sourceFile, line: ctx.getApi().currentLine }),
+		getBreakpoints: () => {
+			const source = ctx.getApi().sourceFile;
+			if (!source) return [];
+			return Array.from(ctx.getApi().breakpoints.values())
+				.map(({ file, line, verified, condition }) => ({ file, line, verified, condition }))
+				.filter((breakpoint) => breakpoint.file && sourcePathKey(breakpoint.file) === sourcePathKey(source));
+		},
 		readSource: async (file, startLine, count) => {
 			const source = await readFile(file, "utf8");
 			return source.split(/\r?\n/).slice(Math.max(0, startLine - 1), Math.max(0, startLine - 1) + count);
@@ -257,9 +286,12 @@ function runningBlocked(api: DebuggerAPI, io: ReplIO): boolean {
 	return false;
 }
 
-async function passthrough(input: string, api: DebuggerAPI, io: ReplIO): Promise<void> {
+
+async function passthrough(input: string, ctx: ReplContext): Promise<void> {
+	const { getApi, io } = ctx;
+	const api = getApi();
 	if (runningBlocked(api, io)) return;
-	const result = await api.evaluate(input, "repl");
+	const result = await withActivity(ctx, "evaluating", () => api.evaluate(input, "repl"));
 	if (result !== undefined && result !== "") {
 		io.line(String(result));
 	}
@@ -275,7 +307,7 @@ async function startTarget(program: string, args: string[], ctx: ReplContext): P
 	const absolute = resolveProgram(program);
 	ctx.io.info(`Starting ${[absolute, ...args].join(" ")}...`);
 	try {
-		await api.launch(absolute, args);
+		await withActivity(ctx, `launching ${path.basename(absolute)}`, () => api.launch(absolute, args));
 	} catch (error) {
 		ctx.io.error(error instanceof Error ? error.message : String(error));
 		cwdHint(ctx.io);
@@ -295,7 +327,10 @@ async function startTarget(program: string, args: string[], ctx: ReplContext): P
  * gdb-style `file <program>`: load symbols now so breakpoints bind
  * immediately, and remember the program so bare `run` can start it.
  */
-async function handleFile(program: string, api: DebuggerAPI, io: ReplIO): Promise<void> {
+
+async function handleFile(program: string, ctx: ReplContext): Promise<void> {
+	const { getApi, io } = ctx;
+	const api = getApi();
 	if (!program) {
 		io.info(lastLaunch ? `Current target: ${lastLaunch.program}` : "No target file. Usage: file <program>");
 		return;
@@ -304,7 +339,7 @@ async function handleFile(program: string, api: DebuggerAPI, io: ReplIO): Promis
 	const absolute = resolveProgram(program);
 	io.info(`Reading symbols from ${absolute}...`);
 	try {
-		await api.evaluate(`file ${absolute}`, "repl");
+		await withActivity(ctx, "loading symbols", () => api.evaluate(`file ${absolute}`, "repl"));
 	} catch (error) {
 		io.error(error instanceof Error ? error.message : String(error));
 		cwdHint(io);
@@ -348,10 +383,15 @@ async function handleBreak(argStr: string, api: DebuggerAPI, io: ReplIO): Promis
 		// Function-name form: GDB resolves it natively. Track the created
 		// breakpoint so the count, `info breakpoints` and `delete` stay honest.
 		const result = await api.evaluate(`break ${argStr}`, "repl");
-		const text = String(result ?? "");
+		const text = String(result ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 		if (text) io.line(text);
 		const created = text.match(/Breakpoint (\d+)/);
-		if (created) api.trackExternalBreakpoint(Number(created[1]), argStr);
+		if (created) {
+			const resolved = text.match(/\bfile\s+(.+?)[,:]\s*line\s+(\d+)/);
+			const file = resolved?.[1] ? resolveProgram(resolved[1].trim()) : undefined;
+			const line = resolved?.[2] ? Number.parseInt(resolved[2], 10) : undefined;
+			api.trackExternalBreakpoint(Number(created[1]), argStr, file, line);
+		}
 		return;
 	}
 
@@ -421,7 +461,9 @@ async function printStack(api: DebuggerAPI, io: ReplIO): Promise<void> {
  * Handle `info` with structured output for the useful subcommands;
  * everything else goes to GDB verbatim.
  */
-async function handleInfo(subcommand: string, input: string, api: DebuggerAPI, io: ReplIO): Promise<void> {
+async function handleInfo(subcommand: string, input: string, ctx: ReplContext): Promise<void> {
+	const api = ctx.getApi();
+	const { io } = ctx;
 	switch (subcommand) {
 		case "locals":
 		case "local":
@@ -435,7 +477,7 @@ async function handleInfo(subcommand: string, input: string, api: DebuggerAPI, i
 			await printBreakpoints(api, io);
 			break;
 		default:
-			await passthrough(input, api, io);
+			await passthrough(input, ctx);
 	}
 }
 
@@ -446,6 +488,7 @@ const ALIASES: Record<string, string> = {
 	c: "continue",
 	n: "next",
 	s: "step",
+	"si": "stepi",
 	f: "finish",
 	i: "info",
 	p: "print",
@@ -470,7 +513,7 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 
 	switch (command) {
 		case "file":
-			await handleFile(args, api, io);
+			await handleFile(args, ctx);
 			break;
 
 		case "run":
@@ -486,28 +529,32 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 			break;
 
 		case "continue":
-			if (requireStopped(api, io)) await api.continue();
+			if (requireStopped(api, io)) await withActivity(ctx, "continuing", () => api.continue());
 			break;
 
 		case "next":
-			if (requireStopped(api, io)) await api.stepOver();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping over", () => api.stepOver());
 			break;
 
 		case "step":
-			if (requireStopped(api, io)) await api.stepInto();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping into", () => api.stepInto());
+			break;
+
+		case "stepi":
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping instruction", () => api.evaluate("si", "repl"));
 			break;
 
 		case "finish":
-			if (requireStopped(api, io)) await api.stepOut();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping out", () => api.stepOut());
 			break;
 
 		case "info":
-			await handleInfo(rest[0] ?? "", input, api, io);
+			await handleInfo(rest[0] ?? "", input, ctx);
 			break;
 
 		case "backtrace":
 		case "print":
-			await passthrough(input, api, io);
+			await passthrough(input, ctx);
 			break;
 
 		case "attach": {
@@ -517,7 +564,7 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 				return;
 			}
 			io.info(`Attaching to ${pid}...`);
-			await api.attach(pid);
+			await withActivity(ctx, `attaching to pid ${pid}`, () => api.attach(pid));
 			io.success(`Attached to ${pid}`);
 			break;
 		}
@@ -543,7 +590,7 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 			break;
 
 		default:
-			await passthrough(input, api, io);
+			await passthrough(input, ctx);
 	}
 }
 
@@ -734,19 +781,19 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 		}
 
 		case "step":
-			if (requireStopped(api, io)) await api.stepInto();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping into", () => api.stepInto());
 			break;
 
 		case "next":
-			if (requireStopped(api, io)) await api.stepOver();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping over", () => api.stepOver());
 			break;
 
 		case "finish":
-			if (requireStopped(api, io)) await api.stepOut();
+			if (requireStopped(api, io)) await withActivity(ctx, "stepping out", () => api.stepOut());
 			break;
 
 		case "continue":
-			if (requireStopped(api, io)) await api.continue();
+			if (requireStopped(api, io)) await withActivity(ctx, "continuing", () => api.continue());
 			break;
 
 		case "stack":
