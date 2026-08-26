@@ -84,6 +84,7 @@ export interface MemoryRead {
 
 export interface Instruction {
 	address: string;
+	symbol?: string;
 	instructionBytes?: string;
 	instruction: string;
 	line?: number;
@@ -120,6 +121,7 @@ export interface DebuggerEvents {
 	"session:exited": { exitCode: number };
 	"session:detached": {};
 	"session:error": { error: Error };
+	"gdb:exited": { exitCode: number };
 	"breakpoint": { id: number; verified: boolean; line?: number; file?: string };
 	"breakpoints-changed": {};
 	"output": { category: string; output: string };
@@ -139,6 +141,14 @@ export interface DapClientConfig {
 	args?: string[];
 	cwd?: string;
 	env?: Record<string, string>;
+	/** GDB commands to run after DAP initialization and before launch/attach. */
+	initCommands?: string[];
+	/** Retain recent DAP frames for diagnostics. Disabled by default. */
+	traceDap?: boolean;
+	/** Maximum number of DAP frames retained when tracing is enabled. */
+	traceDapMaxEntries?: number;
+	/** Maximum DAP payload size accepted by the frame parser. */
+	maxDapFrameSize?: number;
 }
 
 /**
@@ -162,7 +172,7 @@ export interface DebuggerAPI {
 	removeBreakpoint(id: number): Promise<void>;
 	listBreakpoints(): Promise<Breakpoint[]>;
 	/** Register a breakpoint created through raw GDB (passthrough) so it is counted and deletable. */
-	trackExternalBreakpoint(id: number, location?: string): Breakpoint;
+	trackExternalBreakpoint(id: number, location?: string, file?: string, line?: number): Breakpoint;
 
 	// State
 	getState(): SessionState;
@@ -190,7 +200,7 @@ export interface DebuggerAPI {
 	 * with possibly fewer bytes than requested; rejects only if both paths fail.
 	 */
 	readMemory(expression: string, count: number, offset?: number): Promise<MemoryRead>;
-	disassemble(memoryReference: string, instructionCount: number): Promise<Instruction[]>;
+	disassemble(memoryReference: string, instructionCount: number, instructionOffset?: number): Promise<Instruction[]>;
 	listThreads(): Promise<ThreadInfo[]>;
 	capabilities(): DapCapabilities;
 

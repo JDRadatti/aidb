@@ -97,6 +97,7 @@ export function createDebuggerAPI(
 	let cachedStack: { seq: number; frames: StackFrame[] } | null = null;
 	const scopesCache = new Map<number, any>();
 	const variablesCache = new Map<number, Variable[]>();
+	const pendingBreakpointUpdates = new Map<number, { verified: boolean; file?: string; line?: number }>();
 
 	function invalidateStopData(): void {
 		cachedStack = null;
@@ -139,8 +140,10 @@ export function createDebuggerAPI(
 	 * for the stack explicitly after every stop.
 	 */
 	async function refreshLocation(threadId: number): Promise<void> {
+		const requestSeq = stopSeq;
 		try {
 			const result = await dapClient.sendRequest("stackTrace", { threadId });
+			if (requestSeq !== stopSeq || stateMachine.getState() !== "stopped") return;
 			const frame = result.stackFrames?.[0];
 			if (!frame) return;
 			sourceFile = frame.source?.path ?? sourceFile;
@@ -281,7 +284,7 @@ export function createDebuggerAPI(
 	}
 
 	async function rebindBreakpoints(): Promise<void> {
-		const files = [...new Set(Array.from(breakpoints.values()).map((bp) => bp.file).filter(Boolean))];
+		const files = [...new Set(Array.from(breakpoints.values()).filter((bp) => bp.location === undefined).map((bp) => bp.file).filter(Boolean))];
 		for (const file of files) {
 			const old = Array.from(breakpoints.values()).filter((bp) => bp.file === file);
 			const desired = desiredList(file);
@@ -371,10 +374,17 @@ export function createDebuggerAPI(
 		return undefined;
 	}
 
-	eventBus.on("breakpoint", ({ id, verified }) => {
+	eventBus.on("breakpoint", ({ id, verified, file, line }) => {
 		const bp = breakpoints.get(id);
-		if (bp && verified !== bp.verified) {
+		if (!bp) {
+			pendingBreakpointUpdates.set(id, { verified, file, line });
+			return;
+		}
+		if (verified !== bp.verified || file !== undefined || line !== undefined) {
 			bp.verified = verified;
+			if (file) bp.file = file;
+			if (line !== undefined) bp.line = line;
+			notifyBreakpointsChanged();
 		}
 	});
 
@@ -478,10 +488,18 @@ export function createDebuggerAPI(
 			notifyBreakpointsChanged();
 		},
 
-		trackExternalBreakpoint(id: number, location?: string): Breakpoint {
+		trackExternalBreakpoint(id: number, location?: string, file = "", line = 0): Breakpoint {
 			const existing = breakpoints.get(id);
 			if (existing) return existing;
-			const nb: Breakpoint = { id, file: "", line: 0, verified: true, location };
+			const update = pendingBreakpointUpdates.get(id);
+			pendingBreakpointUpdates.delete(id);
+			const nb: Breakpoint = {
+				id,
+				file: update?.file ?? file,
+				line: update?.line ?? line,
+				verified: update?.verified ?? true,
+				location,
+			};
 			breakpoints.set(id, nb);
 			notifyBreakpointsChanged();
 			return nb;
@@ -607,7 +625,7 @@ export function createDebuggerAPI(
 			return { address: address ?? expression, data: bytes };
 		},
 
-		async disassemble(memoryReference: string, instructionCount: number): Promise<Instruction[]> {
+		async disassemble(memoryReference: string, instructionCount: number, instructionOffset = 0): Promise<Instruction[]> {
 			await ensureStarted();
 			if (!capabilitiesSafe().supportsDisassembleRequest) {
 				throw new CapabilityUnsupportedError("disassemble");
@@ -615,12 +633,14 @@ export function createDebuggerAPI(
 			const result = await dapClient.sendRequest("disassemble", {
 				memoryReference,
 				instructionCount,
+				instructionOffset,
 			});
 			return (result?.instructions ?? []).map((ins: any) => ({
 				address: ins.address,
+				symbol: ins.symbol,
 				instructionBytes: ins.instructionBytes,
 				instruction: ins.instruction,
-				line: ins.line,
+				line: ins.location?.line ?? ins.line,
 				column: ins.location?.column ?? ins.column,
 			}));
 		},

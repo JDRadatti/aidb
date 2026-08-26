@@ -277,6 +277,9 @@ export class DapClient {
 		}).then((body) => {
 			this.capabilities = body ?? {};
 		});
+		for (const command of this.config.initCommands ?? ["set disassembly-flavor intel"]) {
+			if (command.trim()) await this.sendRequest("evaluate", { expression: command, context: "repl" });
+		}
 	}
 
 	/**

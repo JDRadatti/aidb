@@ -95,6 +95,63 @@ describe("repl-bridge lifecycle", () => {
 		const commands = fake.requests.map((r) => r.command);
 		expect(commands).toEqual(["attach", "configurationDone"]);
 	});
+
+	it("rolls back launching when launch fails", async () => {
+		const { api, fake } = setup();
+		fake.onRequest("launch", async () => { throw new Error("launch failed"); });
+
+		await expect(api.launch("./app")).rejects.toThrow("launch failed");
+		expect(api.getState()).toBe("not-started");
+	});
+
+	it("restarts GDB and rebinds breakpoints after an unexpected exit", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app", ["--demo"]);
+		await api.setBreakpoint("/tmp/main.c", 12);
+
+		bus.emit("gdb:exited", { exitCode: 1 });
+		await flushAsync();
+
+		expect(fake.count("launch")).toBe(2);
+		expect(fake.count("configurationDone")).toBe(2);
+		expect(fake.count("setBreakpoints")).toBe(2);
+		expect(fake.requests.at(-1)?.command).toBe("configurationDone");
+	});
+
+	it("reports recovery failure without throwing from the exit handler", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app");
+		const errors: Error[] = [];
+		api.on("session:error", ({ error }) => errors.push(error));
+		(fake as any).start = async () => { throw new Error("restart failed"); };
+
+		bus.emit("gdb:exited", { exitCode: 1 });
+		await flushAsync();
+
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message).toBe("restart failed");
+		expect(api.getState()).toBe("error");
+	});
+
+	it("matches breakpoint responses by line when an adapter omits one", async () => {
+		const { api, fake } = setup();
+		await api.launch("./app");
+		await api.setBreakpoint("/tmp/main.c", 10);
+		await api.setBreakpoint("/tmp/main.c", 20);
+		await api.setBreakpoint("/tmp/main.c", 30);
+		fake.onRequest("setBreakpoints", () => ({
+			breakpoints: [
+				{ id: 101, line: 10, verified: true },
+				{ id: 103, line: 30, verified: true },
+			],
+		}));
+
+		await api.setBreakpoint("/tmp/main.c", 10, "x > 0");
+
+		expect([...api.breakpoints.values()].map((bp) => bp.line)).toEqual([10, 30]);
+		expect(api.breakpoints.get(101)?.condition).toBe("x > 0");
+		expect(api.breakpoints.get(103)?.condition).toBeUndefined();
+	});
 });
 
 describe("stop-location tracking", () => {
@@ -148,9 +205,38 @@ describe("stop-location tracking", () => {
 		expect(locations.at(-1)).toEqual({ file: "/tmp/main.c", line: 12 });
 		expect(fake.requests.filter((r) => r.command === "stackTrace")).toHaveLength(1);
 	});
+
+	it("discards a delayed stack location from an older stop", async () => {
+		const { api, bus, fake } = setup();
+		let resolveOld!: (value: any) => void;
+		let stackCalls = 0;
+		fake.onRequest("stackTrace", () => {
+			stackCalls++;
+			if (stackCalls === 1) return new Promise((resolve) => { resolveOld = resolve; });
+			return { stackFrames: [{ id: 8, name: "next", source: { path: "/tmp/next.c" }, line: 20 }] };
+		});
+
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		emitStop(bus, { reason: "step", threadId: 5, source: "/tmp/next.c", line: 20 });
+		resolveOld({ stackFrames: [{ id: 7, name: "main", source: { path: "/tmp/old.c" }, line: 12 }] });
+		await flushAsync();
+
+		expect(api.sourceFile).toBe("/tmp/next.c");
+		expect(api.currentLine).toBe(20);
+	});
 });
 
 describe("active thread tracking", () => {
+	it("rolls back to stopped when continue fails", async () => {
+		const { api, bus, fake } = setup();
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 1 });
+		fake.onRequest("continue", async () => { throw new Error("continue failed"); });
+
+		await expect(api.continue()).rejects.toThrow("continue failed");
+		expect(api.getState()).toBe("stopped");
+	});
+
 	it("routes continue to the thread from the last stop event", async () => {
 		const { api, bus, fake } = setup();
 		await api.launch("./app");
@@ -277,8 +363,10 @@ describe("breakpoint management", () => {
 		fake.onRequest("evaluate", () => ({ result: "Breakpoint 2 at 0x401136" }));
 		await api.launch("./app");
 
-		const tracked = api.trackExternalBreakpoint(2, "main");
+		const tracked = api.trackExternalBreakpoint(2, "main", "/tmp/main.c", 12);
 		expect(tracked.location).toBe("main");
+		expect(tracked.file).toBe("/tmp/main.c");
+		expect(tracked.line).toBe(12);
 		expect((await api.listBreakpoints()).map((bp) => bp.id)).toContain(2);
 
 		await api.removeBreakpoint(2);
@@ -287,6 +375,16 @@ describe("breakpoint management", () => {
 		expect(del?.args.expression).toBe("delete 2");
 		expect(fake.requests.some((r) => r.command === "setBreakpoints" && r.args.breakpoints.length === 0)).toBe(false);
 		expect(await api.listBreakpoints()).toHaveLength(0);
+	});
+
+	it("applies a breakpoint event that arrives before external tracking", () => {
+		const { api, bus } = setup();
+		bus.emit("breakpoint", { id: 4, verified: true, file: "/tmp/main.c", line: 12 });
+
+		const tracked = api.trackExternalBreakpoint(4, "main");
+
+		expect(tracked.file).toBe("/tmp/main.c");
+		expect(tracked.line).toBe(12);
 	});
 
 	it("emits breakpoints-changed after every mutation", async () => {
@@ -619,7 +717,7 @@ describe("threads and disassemble", () => {
 		fake.capabilities.supportsDisassembleRequest = true;
 		fake.onRequest("disassemble", () => ({
 			instructions: [
-				{ address: "0x401136", instructionBytes: "55", instruction: "push rbp", line: 12 },
+				{ address: "0x401136", symbol: "main", instructionBytes: "55", instruction: "push rbp", location: { line: 12 } },
 				{ address: "0x401137", instructionBytes: "4889e5", instruction: "mov rbp,rsp" },
 			],
 		}));
@@ -628,6 +726,6 @@ describe("threads and disassemble", () => {
 
 		const req = fake.requests.at(-1)!;
 		expect(req.args.instructionCount).toBe(2);
-		expect(insns[0]).toMatchObject({ address: "0x401136", instruction: "push rbp", line: 12 });
+		expect(insns[0]).toMatchObject({ address: "0x401136", symbol: "main", instruction: "push rbp", line: 12 });
 	});
 });
