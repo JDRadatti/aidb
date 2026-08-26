@@ -3,20 +3,21 @@
 - pi has a spinner that says Waiting while it is waiting on the model. it would be nice to have one that specifies state of the app. 
 
 ## Phase 0 — Hardening (do this before anything else)
-- [ ] DAP wire tracing: ring-buffer log of all frames in/out, `aidb --trace-dap` dump
-- [ ] GDB crash recovery: detect death mid-session, restart cleanly, re-bind breakpoints
-- [ ] Bounded frame-parse buffer + backpressure-safe stdin writes in DapClient
-- [ ] Feature-gate requests on initialize capabilities (readMemory, disassemble, ...)
-- [ ] Roll back state machine when a request fails (never stick in "running")
-- [ ] Per-stop caches for stack/scopes (today getStack() fires redundantly) + real frame selection for up/down
-- [ ] Match breakpoint sync results by line, not array index
-- [ ] Clean shutdown on every path: await gdb exit, FIFO/tmpdir cleanup, no zombies
+- [x] DAP wire tracing: ring-buffer log of all frames in/out, `aidb --trace-dap` dump
+- [x] GDB crash recovery: detect death mid-session, restart cleanly, re-bind breakpoints
+- [x] Bounded frame-parse buffer + backpressure-safe stdin writes in DapClient
+- [x] Feature-gate requests on initialize capabilities (readMemory, disassemble, ...)
+- [x] Roll back state machine when a request fails (never stick in "running")
+- [x] Per-stop caches for stack/scopes (today getStack() fires redundantly) + real frame selection for up/down
+- [x] Match breakpoint sync results by line, not array index
+- [x] Clean shutdown on every path: await gdb exit, FIFO/tmpdir cleanup, no zombies
 - [ ] In-process fake gdb (mock DAP server) so vitest covers client/bridge without spawning gdb
-- [ ] Fuzz tests for the Content-Length frame parser (garbage, split, oversized)
-- [ ] Race tests for exit-debounce / exec-boundary / relaunch heuristics
+- [x] Fuzz tests for the Content-Length frame parser (garbage, split, oversized)
+- [x] Race tests for exit-debounce / exec-boundary / relaunch heuristics
 - [ ] Golden-file tests for TUI rendering
-- [ ] Perf benchmarks: step latency, giant frames, large memory reads (see benchmark-plan.html)
-- [ ] Typed error taxonomy: core errors vs gdb passthrough, surfaced uniformly in TUI
+- [x] Perf benchmarks: initial step/command latency suite (see benchmark-plan.html)
+- [ ] Perf benchmarks: giant frames and large memory reads
+- [x] Typed error taxonomy: core errors vs gdb passthrough, surfaced uniformly in TUI
 
 ## Phase 1 — Ergonomics
 - [ ] Distinct colors: user input vs program stdout vs gdb console vs errors (theme.ts)
@@ -27,12 +28,10 @@
           `windows` (layout presets, manifest dir, refresh policy),
           `agent` (tool permissions, approval gates)
 - [ ] Remappable keybindings (loaded from config)
-- [ ] State-aware activity spinner (pi-style, not just "Waiting"): label reflects what aidb is
+- [x] State-aware activity spinner (pi-style, not just "Waiting"): label reflects what aidb is
       actually doing — `launching gdb`, `waiting for breakpoint hit (pid 4242)`,
       `reading 256B @ &player`, `restarting after crash` — driven by session state +
       the in-flight request queue; a spinner that never advances also exposes hung requests
-- [ ] Vim-style modal input: NORMAL/INSERT modes (Esc/i/v), j·k·g·G / Ctrl+d·u scroll,
-      `:` ex-style commands; arrows = history only while the prompt is focused
 - [ ] Scrollback everywhere: transcript + every pane scrolls independently when focused
 - [ ] Discoverable shortcuts: contextual key-hint footer for the focused view
       (`?` overlay lists everything); hints derived from keybinding config so remaps stay true
@@ -54,30 +53,31 @@ Build order (each step shippable):
 - [ ] 3. Pane lifecycle: `/win close` collapses into sibling (REPL pane shrinks, never dies);
       focus moves with Ctrl+w h/j/k/l (directional) and Ctrl+w w (cycle);
       `/win resize <+|-|equal>` adjusts split ratios; min-size guards; tiny-terminal fallback = REPL only
-- [ ] 4. Shared view base class — the reason vim keys work everywhere:
+- [x] 4. Shared view base class — the reason vim keys work everywhere:
       every pane = same underlying structure (content lines + cursor + scroll state);
       base owns scrolling/cursor/clipping, views only supply `content()` + select hooks (~100 lines each)
-- [ ] 5. Swap visualization in place: `/win load <id>` or `v` picker overlay on the focused pane
-- [ ] 6. Blank watch pane UX: `o` add expression inline, Enter follow pointer, `d` delete entry
+- [x] 5. Swap visualization in place: `/win load <id>` and `/win pick` on a live pane
+- [x] 6. Blank watch pane UX: `o` add expression inline, Enter refresh, `d` delete entry
 - [ ] 7. Views: source (#3), assembly (#4), registers (#5), locals tree w/ lazy children, threads
 - [ ] 8. `/tree` stop-history browser: snapshot every stop (frames, vars, regs, watched bytes);
       browse past commands/stops and view their cached state read-only — no rewind, but no amnesia
       (opens in a pane like any other view — the layout tree makes it free)
 - [ ] 9. Persist the layout tree + per-view state with sessions (P1)
-- [ ] Source view: current-line marker, breakpoint markers, syntax coloring
+- [x] Source view: current-line marker, breakpoint markers
+- [x] Source view: conservative syntax coloring (replace with semantic/LSP spans later)
 - [ ] Assembly view: DAP `disassemble`, PC arrow, source/asm interleave toggle
-- [ ] Registers view with per-step change highlighting
+- [x] Registers view with per-step change highlighting
 - [ ] Locals/args tree with lazy child expansion (variablesReference)
 - [ ] Threads view: list all threads, switch, per-thread state
 
 ## Phase 3 — Memory engine & watch windows (raddebugger-style)
-- [ ] MemoryService: DAP `readMemory` with `x/…` evaluate fallback; symbol→address resolution
-- [ ] Hexdump window: hex + ascii columns, type overlays, pointer-follow navigation
-- [ ] Diff highlighting: changed bytes / registers / vars between stops
-- [ ] Pinned windows bound to expressions (`&player`, heap ranges), auto-refresh on stop
+- [x] MemoryService: DAP `readMemory` with `x/…` evaluate fallback; symbol→address resolution
+- [x] Hexdump window: adaptive hex + ascii columns
+- [x] Diff highlighting: changed bytes / registers / vars between stops
+- [x] Pinned windows bound to expressions (`&player`, heap ranges), auto-refresh on stop
 - [ ] Watch entries with persistent per-expression formatting (hex/dec/float/char/bin)
 - [ ] Struct-over-memory rendering driven by `ptype /o` offset introspection
-- [ ] Sparkline/plot windows for values sampled at each stop (ring-buffer history)
+- [x] Sparkline/plot windows for values sampled at each stop (ring-buffer history)
 
 ## Phase 4 — Agent-built visualization (pi integration)
 - [ ] Declarative window manifests (versioned JSON schema) — the agent authoring surface
@@ -93,3 +93,32 @@ Build order (each step shippable):
 - [ ] Backend abstraction so lldb-dap can sit behind the same DebuggerAPI
 - [ ] Remote debugging (gdbserver) + record/replay reverse stepping
 - [ ] Time-travel scratchpad: pin state snapshots, compare stops side by side
+
+
+- testing strategy: 
+once we get AI integration, the AI will be able to run the debugger and visualize the screen 
+we can enumerate every single feature and what it should look like. then, we can create an ai swarm 
+to try each of the features in random orders (need a graph of dependent features; test both valid graphs and invalid graphs)
+we can try on different OSs with different versions with differenet screen sizes. 
+- we can also task the AI to create a certain visualization and check output. 
+- the watch windows are nice, but ideally would like to create better output visuzlations.
+
+ISSUES: 
+- Auto complete on tab even when not relevant
+- cannot scoll repl
+
+
+LATER: 
+
+- [ ] Vim-style modal input: NORMAL/INSERT modes (Esc/i/v), j·k·g·G / Ctrl+d·u scroll,
+      `:` ex-style commands; arrows = history only while the prompt is focused
+- [ ] colors: raddbg has colors that matches source code to assembly. it might be nice to color coordinate the asm based on dependencies
+- [ ] would like Enter to replay the previous command, like in gdb
+- going to prev with ctrl+p should put sursor at the end
+
+- [ ] Source/assembly visualizer: add an interleaved view that groups assembly
+      instructions beneath their source lines; later add a toggle between the
+      current separate panes and the interleaved view.
+
+- gdb features are missing. like si 2 to go si twice
+- asm is not rendered ideally? maybe add some spacing? gdb make clear distinction between src and func name

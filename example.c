@@ -1,3 +1,4 @@
+// THsi is a comment
 #include <stdio.h>
 
 int func(int x, float y)
@@ -14,5 +15,11 @@ int main(void)
     float can_i_add_int_and_float = func(f, lets_do);
 
     printf("I guess I can %f", can_i_add_int_and_float);
+
+    int total = 0;
+    for (int i = 0; i < 10; i++) 
+    {
+        total += i;
+    }
     return 0;
 }
