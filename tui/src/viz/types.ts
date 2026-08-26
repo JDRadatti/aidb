@@ -14,7 +14,7 @@ export interface Rect {
 	height: number;
 }
 
-export type BindingKind = "memory" | "series" | "tree" | "registers" | "source" | "assembly";
+export type BindingKind = "memory" | "series" | "tree" | "registers" | "source" | "assembly" | "interleaved";
 
 /** A node of an expanded expression tree (struct-tree interpreter input). */
 export interface VarNode {
@@ -43,14 +43,25 @@ export interface SourceLocation {
 	line: number;
 }
 
+export interface SourceBreakpoint {
+	line: number;
+	verified: boolean;
+	condition?: string;
+}
+
 export interface AssemblyLine {
 	address: string;
+	symbol?: string;
 	instructionBytes?: string;
 	instruction: string;
 	line?: number;
 	column?: number;
 	current?: boolean;
 }
+
+export type InterleavedRow =
+	| { kind: "source"; line: number; text: string; current: boolean }
+	| { kind: "instruction"; instruction: AssemblyLine };
 
 /** Everything a binding may touch. Hosted by repl.ts over DebuggerAPI. */
 export interface FetchCtx {
@@ -59,8 +70,9 @@ export interface FetchCtx {
 	getVariableChildren(reference: number, start?: number, count?: number): Promise<VarNode[]>;
 	readMemory(expression: string, count: number, offset?: number): Promise<{ address: string; data: Uint8Array }>;
 	getLocation?(): SourceLocation;
+	getBreakpoints?(): SourceBreakpoint[];
 	readSource?(file: string, startLine: number, count: number): Promise<string[]>;
-	disassemble?(memoryReference: string, instructionCount: number): Promise<AssemblyLine[]>;
+	disassemble?(memoryReference: string, instructionCount: number, instructionOffset?: number): Promise<AssemblyLine[]>;
 }
 
 /**
@@ -81,8 +93,12 @@ export interface BindingSnapshot {
 	file?: string;
 	startLine?: number;
 	currentLine?: number;
+	breakpoints?: SourceBreakpoint[];
 	instructions?: AssemblyLine[];
 	currentAddress?: string;
+	interleaved?: InterleavedRow[];
+	/** Non-fatal status shown above otherwise useful data. */
+	info?: string;
 	error?: string;
 }
 
@@ -93,6 +109,8 @@ export interface Binding {
 	/** Short human label for pane titles and the /win pick menu. */
 	describe(): string;
 	fetch(ctx: FetchCtx, prev?: BindingSnapshot): Promise<BindingSnapshot>;
+	/** Update view-dependent fetch sizing; returns true when it changed. */
+	setViewportHeight?(rows: number): boolean;
 	/** Clear state that belongs to a debugger run, such as sample history. */
 	reset?(): void;
 }

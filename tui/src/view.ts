@@ -155,6 +155,15 @@ export abstract class View implements Component {
 		this.changed();
 	}
 
+	/** Place a newly selected cursor near the middle of the viewport. */
+	protected centerCursor(line: number): void {
+		const count = this.lineCount();
+		this.cursorLine = Math.max(0, Math.min(count - 1, line));
+		const maxScroll = Math.max(0, count - this.viewportHeight);
+		this.scrollRow = Math.max(0, Math.min(maxScroll, this.cursorLine - Math.floor(this.viewportHeight / 2)));
+		this.changed();
+	}
+
 	/**
 	 * Half-page scroll: the viewport moves by `rows` and the cursor rides
 	 * along, keeping its screen position where possible (vim Ctrl+d/Ctrl+u).
