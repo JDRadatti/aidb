@@ -284,6 +284,10 @@ function scrollActivePane(data: string): void {
 	if (!active) return;
 	if (active instanceof View) active.handleInput(data);
 	else if (active instanceof ReplTranscript) active.handleInput(data);
+	// Scrolling only mutates pane scroll state synchronously; nothing else
+	// schedules a repaint (a consumed key skips the focused editor's path that
+	// otherwise triggers requestImmediateRender). Paint the new viewport now.
+	tui.requestRender();
 }
 
 /** Map raw input to a configured action, or undefined if unbound. */
