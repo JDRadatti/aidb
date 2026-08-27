@@ -642,6 +642,34 @@ describe("evaluateDetailed", () => {
 describe("readMemory", () => {
 	const bytes64ff = Buffer.from([0x64, 0x00, 0xff]).toString("base64");
 
+	it("can use an evaluated value's memoryReference for a raw read", async () => {
+		const { api, fake } = setup();
+		fake.capabilities.supportsReadMemoryRequest = true;
+		fake.onRequest("evaluate", () => ({
+			result: "{r = 100, g = 150, b = 200}",
+			type: "struct Pixel",
+			variablesReference: 12,
+			memoryReference: "0x601040",
+		}));
+		fake.onRequest("readMemory", (args) => ({
+			address: args?.memoryReference,
+			data: Buffer.from([100, 150, 200]).toString("base64"),
+		}));
+		await api.launch("./app");
+
+		const info = await api.evaluateDetailed("frame[0]");
+		const read = await api.readMemory(info.memoryReference!, 3);
+
+		expect(info.type).toBe("struct Pixel");
+		expect(info.memoryReference).toBe("0x601040");
+		expect(read.address).toBe("0x601040");
+		expect(Array.from(read.data)).toEqual([100, 150, 200]);
+		expect(fake.requests.find((request) => request.command === "readMemory")?.args).toMatchObject({
+			memoryReference: "0x601040",
+			count: 3,
+		});
+	});
+
 	it("uses DAP readMemory and decodes base64 when supported", async () => {
 		const { api, fake } = setup();
 		fake.capabilities.supportsReadMemoryRequest = true;

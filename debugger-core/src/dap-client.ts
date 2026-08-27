@@ -273,6 +273,7 @@ export class DapClient {
 			columnsStartAt1: true,
 			supportsVariableType: true,
 			supportsVariablePaging: false,
+			supportsMemoryReferences: true,
 			supportsRunInTerminalRequest: false,
 		}).then((body) => {
 			this.capabilities = body ?? {};
