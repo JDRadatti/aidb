@@ -24,7 +24,7 @@ export interface WatchEntry {
 	pending?: boolean;
 }
 
-const HINT_LINES = ["watch is empty", "", "o: add expression   d: delete   enter: refresh"];
+const HINT_LINES = ["watch is empty", "", "add: /watch <expr>", "renderer: /watch cycle [n] · flags: /watch flag <name> [n] · delete: /watch del <n>", "all: /watch list"];
 
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");

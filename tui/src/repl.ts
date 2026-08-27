@@ -86,12 +86,16 @@ const WIN_HELP = [
 	"                                              shift on close!)",
 	"  /watch <expr>                               pin an expression to a live watch",
 	"                                              pane (auto-creates 'watch')",
+	"  /watch list | cycle [n] | flag <name> [n] | del <n>   manage watch entries:",
+	"                                              cycle the renderer or toggle a flag on",
+	"                                              entry n (default: the last added)",
 	"  /win load <idx|name> <what>                 bind a live visualizer into a pane:",
 	"                                              regs · mem <expr> [bytes] · plot n ·",
 	"                                              tree player · source · asm",
 	"                                              mem suffix is raw byte count (default 192),",
 	"                                              not tuples — e.g. mem frame 12 = 12 bytes",
-	"  /win pick [idx|name] [view]                 list interpreters, or swap one in place",
+	"  /win pick [idx|name] [view|+flag]           list interpreters, or swap one in place;",
+	"                                              toggle a render flag with /win pick <ref> +flag",
 	"",
 	"Notes:",
 	"  - Indices are positions in /win list order, not permanent ids. Name panes",
@@ -800,6 +804,124 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 	}
 }
 
+/**
+ * Management subcommands for the live watch pane. The editor owns the keys,
+ * so watch entry actions are commands (same model as /watch <expr> adding).
+ * Anything that isn't a reserved subcommand is treated as an expression to add.
+ */
+async function handleWatch(args: string, ctx: ReplContext): Promise<void> {
+	const io = ctx.io;
+	const sub = args.trim();
+	const rest = sub.split(/\s+/);
+	let found = findWatchView(ctx.windows);
+
+	// `list` or bare `/watch` → show the current entries and their renderers.
+	if (rest[0] === "list" || sub === "") {
+		if (!found) {
+			io.info("No watch pane yet. Use /watch <expr> to create one.");
+			return;
+		}
+		const entries = found.view.getEntries();
+		if (entries.length === 0) {
+			io.line(`${found.id}: <empty>`);
+			return;
+		}
+		io.line(`${found.id}:`);
+		entries.forEach((entry, index) => {
+			const flags = entry.renderSpec.flags ?? 0;
+			const flagNames = Object.entries(VIEW_FLAG_META)
+				.filter(([, meta]) => meta.name !== "none" && (flags & Number(flagBit(meta.name)!)) !== 0)
+				.map(([, meta]) => meta.name)
+				.join("|");
+			io.line(`  ${index}. ${entry.renderSpec.rendererId.padEnd(12)} ${entry.expr}${flagNames ? `  +${flagNames}` : ""}`);
+		});
+		io.info("cycle: /watch cycle [n] · flags: /watch flag <name> [n] · delete: /watch del <n>");
+		return;
+	}
+
+	if (!found) {
+		const id = nextWatchId(ctx.windows);
+		const previous = ctx.windows.active;
+		const result = ctx.windows.split("v", undefined, id);
+		if (!result.ok) {
+			io.error(`${result.error} — create a pane first: /win hsplit watch`);
+			return;
+		}
+		ctx.windows.mount(result.value, makeWatchView(ctx, result.value));
+		ctx.windows.switchTo(previous);
+		found = findWatchView(ctx.windows);
+		io.info(`Created live watch pane '${id}'.`);
+	}
+	if (!found) return;
+	const view = found.view;
+
+	if (rest[0] === "cycle") {
+		const index = resolveIndex(rest[1]) ?? view.getEntries().length - 1;
+		if (index >= view.getEntries().length) {
+			io.error("Watch entry index out of range.");
+			return;
+		}
+		view.cycleRendererAt(index);
+		ctx.requestRender();
+		io.success(entrySummary(view, index));
+		return;
+	}
+	if (rest[0] === "flag") {
+		const bit = flagBit(rest[1] ?? "");
+		if (bit === undefined) {
+			io.error("Usage: /watch flag <name> [n] — names: " + Object.values(VIEW_FLAG_META).map((m) => m.name).join(", "));
+			return;
+		}
+		const index = resolveIndex(rest[2]) ?? view.getEntries().length - 1;
+		if (index >= view.getEntries().length) {
+			io.error("Watch entry index out of range.");
+			return;
+		}
+		view.toggleFlagAt(index, bit);
+		ctx.requestRender();
+		io.success(`${entrySummary(view, index)} · ${VIEW_FLAG_META[bit]!.name}`);
+		return;
+	}
+	if (rest[0] === "del") {
+		const index = resolveIndex(rest[1]);
+		if (index === undefined || index >= view.getEntries().length) {
+			io.error("Usage: /watch del <n> — a valid entry index");
+			return;
+		}
+		const removed = view.getEntries()[index]!.expr;
+		view.removeAt(index);
+		ctx.requestRender();
+		io.success(`Stopped watching ${removed}.`);
+		return;
+	}
+
+	// Otherwise it's an expression to add.
+	if (!sub) {
+		io.error("Usage: /watch <expr> | list | cycle [n] | flag <name> [n] | del <n>");
+		return;
+	}
+	view.add(sub);
+	ctx.requestRender();
+	io.success(`Watching ${sub}.`);
+}
+
+/** Parse an entry index; omitted → undefined (caller applies a default). */
+function resolveIndex(raw: string | undefined): number | undefined {
+	if (raw === undefined) return undefined;
+	const n = Number.parseInt(raw, 10);
+	return Number.isNaN(n) || n < 0 ? undefined : n;
+}
+
+/** "frame → renderer tuple +types" · "hp → renderer lines" */
+function entrySummary(view: WatchListView, index: number): string {
+	const entry = view.getEntries()[index];
+	if (!entry) return "no entry";
+	const flags = entry.renderSpec.flags ?? 0;
+	const names = Object.values(VIEW_FLAG_META).filter((m) => m.name !== "none" && (flags & flagBit(m.name)!) !== 0).map((m) => m.name);
+	return `${entry.expr}: renderer ${entry.renderSpec.rendererId}${names.length ? ` +${names.join("|")}` : ""}`;
+}
+
+
 async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void> {
 	const words = input.slice(1).split(/\s+/);
 	const command = words[0] ?? "";
@@ -906,31 +1028,9 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			await handleWin(args, ctx);
 			break;
 
-		case "watch": {
-			const expr = args.trim();
-			if (!expr) {
-				io.error("Usage: /watch <expr> — re-evaluated after every stop");
-				return;
-			}
-			let found = findWatchView(ctx.windows);
-			if (!found) {
-				const id = nextWatchId(ctx.windows);
-				const previous = ctx.windows.active;
-				const result = ctx.windows.split("v", undefined, id);
-				if (!result.ok) {
-					io.error(`${result.error} — create a pane first: /win hsplit watch`);
-					return;
-				}
-				ctx.windows.mount(result.value, makeWatchView(ctx, result.value));
-				ctx.windows.switchTo(previous); // auto-create must not steal focus
-				found = findWatchView(ctx.windows);
-				io.info(`Created live watch pane '${id}'.`);
-			}
-			if (!found) return;
-			found.view.add(expr);
-			ctx.requestRender();
+		case "watch":
+			await handleWatch(args, ctx);
 			break;
-		}
 
 		case "quit":
 			io.info("Shutting down...");
