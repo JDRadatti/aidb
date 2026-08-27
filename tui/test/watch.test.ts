@@ -29,7 +29,7 @@ describe("WatchListView", () => {
 	it("shows hints when empty", () => {
 		const view = makeView();
 		const lines = view.render(40);
-		assert.ok(lines.some((l) => l.includes("o: add expression")));
+		assert.ok(lines.some((l) => l.includes("/watch <expr>")));
 	});
 
 	it("o opens the prompt, typing accumulates, enter commits", async () => {

@@ -31,11 +31,12 @@ The normal implementation result should be a renderer, renderer descriptor, fixt
   rendering through `renderInterpreter`; `setRenderSpec` reuses cached bytes when the budget allows.
 - [x] **Phase 6 (first half)** — `render-spec.ts` gives `RenderSpec { rendererId, options? }`, `requiredBytes()`,
   `canReuseObservation()`; `OptionDescriptor` + `optionSchema` per renderer; `INTERPRETERS` registry back /win pick.
-- [x] **Phase 6 (flags + keybinding + AI metadata)** — `ViewFlags` (const-object, `erasableSyntaxOnly` safe)
+- [x] **Phase 6 (flags + commands + AI metadata)** — `ViewFlags` (const-object, `erasableSyntaxOnly` safe)
   threaded into `RenderSpec` and every byte renderer/render path; `ViewFlags` stays render-time only so toggling
   never refetches; `VIEW_FLAG_META` machine-readable flag metadata; `Interpreter.examples`;
-  renderer cycling (`cycleRenderer`) + per-flag toggling in `WatchListView` keys and `LivePaneView.toggleFlag`;
-  `/win pick <ref> <interpreter> | +flag` toggles live-pane flags from the console.
+  renderer cycling (`cycleRenderer`) + flag toggling (`toggleFlagAt`/`toggleFlag`).
+  Interaction is **command-driven** because panes never capture keys: `/watch cycle [n]`, `/watch flag <name> [n]`,
+  `/watch del <n>`, `/watch list` for watch entries, and `/win pick <ref> <interpreter> | +flag` for live panes.
 - [ ] **Phase 7** — safe AI creation tools and plugin boundary (next).
 
 ### Phase 6 remainder: ViewFlags, renderer-loop flag toggling, and AI-facing metadata
@@ -68,9 +69,11 @@ remaining work, grounded in the real code:
    only** — `requiredBytes()` ignores them, so toggling a flag never refetches (same contract the
    existing "switch without a new fetch" tests enforce).
 
-3. **Keybinding/command to toggle flags and cycle renderers.** In `WatchListView` — which owns the
-   `RenderSpec` per entry — add keys to cycle the renderer and toggle a flag per key. `LivePaneView`
-   needs to hold a `RenderSpec` (not just `interpreterId`) so it hosts flags natively too.
+3. **Command surface to toggle flags and cycle renderers.** The TUI keeps the prompt focused and panes
+   never capture keys (main.ts), so the interaction is commands, not keybindings: watch entries via
+   `/watch cycle [n]` and `/watch flag <name> [n]`; live panes via `/win pick <ref> <interpreter>` and
+   `/win pick <ref> +flag`. `LivePaneView` holds flags (not just an interpreter id) so it can host
+   render-time flag toggling without a refetch.
 
 4. **Expose AI-facing descriptor metadata.** Give interpreters an `examples?: string[]` field (the plan
    lists `examples` but no interpreter sets it yet) and a machine-readable map from each `ViewFlags`

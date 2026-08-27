@@ -139,6 +139,49 @@ describe("window commands", () => {
 		assert.deepEqual(view.getEntries().map((e) => e.expr), ["i", "sum"]);
 	});
 
+	it("/watch cycle lists change the renderer of an entry", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		await handleReplInput("/watch sum", ctx);
+		const view = windows.component("watch") as WatchListView;
+		assert.equal(view.getEntries()[0].renderSpec.rendererId, "lines");
+
+		await handleReplInput("/watch cycle 0", ctx);
+		assert.equal(view.getEntries()[0].renderSpec.rendererId, "text");
+		assert.equal(view.getEntries()[1].renderSpec.rendererId, "lines", "entry 1 untouched");
+		assert.match(messages.map((m) => m.text).join("\n"), /renderer text/);
+	});
+
+	it("/watch flag toggles a flag on an entry by name", async () => {
+		const { ctx, windows } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		await handleReplInput("/watch sum", ctx);
+		const view = windows.component("watch") as WatchListView;
+
+		await handleReplInput("/watch flag types 1", ctx);
+		assert.notEqual(view.getEntries()[1].renderSpec.flags ?? 0, 0, "flag should be set");
+	});
+
+	it("/watch del removes an entry", async () => {
+		const { ctx, windows } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		await handleReplInput("/watch sum", ctx);
+		const view = windows.component("watch") as WatchListView;
+		await handleReplInput("/watch del 0", ctx);
+		assert.deepEqual(view.getEntries().map((e) => e.expr), ["sum"]);
+	});
+
+	it("/watch list prints entries with renderers and flags", async () => {
+		const { ctx, messages } = makeContext();
+		await handleReplInput("/watch i", ctx);
+		await handleReplInput("/watch cycle 0", ctx);
+		messages.length = 0;
+		await handleReplInput("/watch list", ctx);
+		const listing = messages.map((m) => m.text).join("\n");
+		assert.match(listing, /0\./);
+		assert.match(listing, /text/);
+	});
+
 	it("refreshLivePanes re-evaluates on stops, across all watch panes", async () => {
 		const values: Record<string, string> = { i: "1", n: "1" };
 		const { ctx, windows } = makeContext({
