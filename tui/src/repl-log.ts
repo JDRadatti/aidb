@@ -61,11 +61,12 @@ export class ReplTranscript extends Container {
 		if (!Number.isFinite(delta) || delta === 0) return 0;
 		const maxScroll = this.maxScroll();
 		if (delta < 0) {
-			// Scroll up: leave the live tail, starting from the end.
+			// Scrolling up: leave the live tail (anchor at the end) the first
+			// time, then keep accumulating from the current pinned position.
+			if (this.followingEnd) this.scrollTop = maxScroll;
 			this.followingEnd = false;
+		} else if (this.followingEnd) {
 			this.scrollTop = maxScroll;
-		} else {
-			this.scrollTop = this.followingEnd ? maxScroll : this.scrollTop;
 		}
 		const base = this.scrollTop;
 		const next = Math.max(0, Math.min(maxScroll, base + Math.trunc(delta)));

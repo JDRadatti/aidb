@@ -99,4 +99,26 @@ describe("ReplTranscript", () => {
 		assert.deepEqual(t.render(80).map((l) => l.trim()).slice(0, 3), ["c", "d", "e"]);
 		assert.equal(t.isScrolledBack, false);
 	});
+
+	it("repeated scroll-up accumulates to the top", () => {
+		const t = make(3);
+		// 10 lines, viewport 3 -> 7 pages of headroom
+		add(t, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j");
+		// first scroll up: tail(efg? no: tail is h,i,j) -> leaves tail
+		t.handleInput("\x1b[5~"); // pgUp 1 (-2 rows, viewport-1)
+		t.render(80); // render so scrollTop accounts for the footer row
+		const first = t.render(80).map((l) => l.trim()).slice(0, 3);
+		// second scroll up should go higher, not re-anchor at the tail
+		t.handleInput("\x1b[5~");
+		const second = t.render(80).map((l) => l.trim()).slice(0, 3);
+		assert.notDeepEqual(second, first, "second page-up should keep scrolling, not reset to tail");
+		// keep going until the very top
+		let guard = 0;
+		while (t.isScrolledBack && guard < 20) {
+			t.handleInput("\x1b[5~");
+			guard++;
+		}
+		const top = t.render(80).map((l) => l.trim()).slice(0, 3);
+		assert.equal(top.includes("a"), true, "should eventually reach the first line");
+	});
 });
