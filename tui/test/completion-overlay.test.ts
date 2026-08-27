@@ -95,6 +95,55 @@ describe("AidbEditor", () => {
 		assert.deepEqual([...aidbLines, ...aidb.dropdownLines], stockLines);
 	});
 
+	it("a single Enter applies an argument completion and submits the slash command", async () => {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme());
+
+		let submitted: string | undefined;
+		aidb.onSubmit = (text) => {
+			submitted = text;
+		};
+
+		// Argument completion: the prefix is the bare token ("list"), which
+		// upstream classifies as a non-slash completion and would normally leave
+		// the prompt open after applying it.
+		aidb.setAutocompleteProvider({
+			getSuggestions: () =>
+				Promise.resolve({
+					// Two items so Tab shows a dropdown instead of auto-applying the
+					// single match; the exact "list" is what gets highlighted.
+					items: [
+						{ value: "list", label: "list" },
+						{ value: "listicle", label: "listicle" },
+					],
+					prefix: "list",
+				}),
+			applyCompletion: (lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, prefix: string) => {
+				const line = lines[cursorLine]!;
+				const before = line.slice(0, cursorCol - prefix.length);
+				const after = line.slice(cursorCol);
+				const result = [...lines];
+				result[cursorLine] = before + item.value + after;
+				return {
+					lines: result,
+					cursorLine,
+					cursorCol: before.length + item.value.length,
+				};
+			},
+		});
+
+		aidb.setText("/win list");
+		aidb.handleInput("\t"); // open the argument dropdown over the typed token
+		await settle();
+		assert.ok(aidb.isShowingAutocomplete(), "argument dropdown is showing");
+
+		aidb.handleInput("\r"); // one Enter
+		await settle();
+
+		assert.equal(submitted, "/win list", "single Enter applies + submits");
+		assert.ok(aidb.isShowingAutocomplete() === false, "dropdown closed");
+	});
+
 	it("returns to stock output once the dropdown closes", async () => {
 		const { tui } = stubTui();
 		const aidb = new AidbEditor(tui, createEditorTheme());

@@ -23,6 +23,7 @@ import {
 	type Component,
 	type EditorTheme,
 	Editor,
+	getKeybindings,
 	type OverlayOptions,
 	type SizeValue,
 	type TUI,
@@ -78,6 +79,41 @@ export class AidbEditor extends Editor {
 		rec.history.push(
 			...entries.filter((x): x is string => typeof x === "string" && x.trim().length > 0),
 		);
+	}
+
+	/**
+	 * Make Enter submit a slash command in one press even when an argument
+	 * autocomplete dropdown is open.
+	 *
+	 * pi-tui's Editor only treats completions whose `autocompletePrefix` starts
+	 * with "/" as "apply, then fall through to submit" (Enter). Our
+	 * position-aware argument completion returns the bare token as the prefix
+	 * (so highlighting and token replacement stay correct), which upstream
+	 * classifies as a non-slash completion: pressing Enter applies the
+	 * suggestion but leaves the prompt open — forcing a second Enter to run the
+	 * command. Here we detect that "applied but not submitted" result and
+	 * submit it ourselves after the stock handler runs.
+	 */
+	override handleInput(data: string): void {
+		const autocompleteShown = this.isShowingAutocomplete();
+		const isSlashConfirm =
+			autocompleteShown &&
+			this.getText().trimStart().startsWith("/") &&
+			getKeybindings().matches(data, "tui.select.confirm");
+
+		super.handleInput(data);
+
+		// Upstream applied the argument completion and kept the prompt open
+		// (text non-empty) instead of submitting. Run the command now.
+		if (isSlashConfirm && !this.isShowingAutocomplete() && this.getText()) {
+			this.submitForSlash();
+		}
+	}
+
+	/** Clean up an argument-completed slash command by submitting it. */
+	private submitForSlash(): void {
+		const rec = this as unknown as { submitValue?: () => void };
+		if (typeof rec.submitValue === "function") rec.submitValue();
 	}
 
 	render(width: number): string[] {
