@@ -316,8 +316,8 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 	return undefined;
 });
 
-transcript.addChild(new Text(colors.bold("aidb — GDB via DAP")));
-transcript.addChild(new Text(colors.muted("file <program> to load, break <file:line> to stop, run to start. /help for more.")));
+transcript.addChild(new Text(colors.bold("aidb — GDB via DAP"), 1, 0));
+transcript.addChild(new Text(colors.muted("file <program> to load, break <file:line> to stop, run to start. /help for more."), 1, 0));
 updateStatus();
 
 tui.start();

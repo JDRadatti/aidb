@@ -34,10 +34,15 @@ export class ReplTranscript extends Container {
 		for (const child of this.children) (child as Component).invalidate?.();
 	}
 
-	/** Append one line to the history and follow it (unless pinned back). */
+	/** Append one line to the history and follow it (unless pinned back).
+	 *
+	 * Lines pack tightly (padY=0) so the transcript reads close together — a
+	 * blank row above/below each entry was the original "far apart" look.
+	 */
 	addLine(text: string): void {
 		if (!text) return;
-		this.addChild(new Text(text.replace(/\n$/, "")));
+		const stripped = text.replace(/\n$/, "");
+		this.addChild(new Text(stripped, 1, 0));
 	}
 
 	clear(): void {

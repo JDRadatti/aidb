@@ -81,6 +81,20 @@ describe("ReplTranscript", () => {
 		assert.ok(t.render(80).some((l) => l.trim() === "hello"));
 	});
 
+	it("addLine packs lines tightly with no blank buffer rows", () => {
+		// The complaint was that entries were spaced too far apart. Each output
+		// now sits directly on the next row — no blank row above or below.
+		const t = make(12);
+		t.addLine("one");
+		t.addLine("two");
+		const lines = t.render(80).map((l) => l.trim());
+		const i1 = lines.indexOf("one");
+		const i2 = lines.indexOf("two");
+		assert.notEqual(i1, -1, "first message present");
+		assert.notEqual(i2, -1, "second message present");
+		assert.equal(i2, i1 + 1, "second message sits immediately below the first");
+	});
+
 	it("clear resets scroll state", () => {
 		const t = make(3);
 		add(t, "a", "b", "c", "d", "e");
