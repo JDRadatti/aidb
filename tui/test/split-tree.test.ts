@@ -106,4 +106,19 @@ describe("SplitTree", () => {
 		assert.deepEqual(copy.serialize(), tree.serialize());
 		assert.deepEqual(copy.panes(), tree.panes());
 	});
+
+	it("regression: hsplit works in a lone column beside a row-split column", () => {
+		// 3 columns, the leftmost split into rows, then the last column closed.
+		const tree = new SplitTree("repl");
+		tree.split("v", "a");
+		tree.split("v", "b"); // v(repl, a, b)
+		tree.setActive("repl");
+		tree.split("h", "r1"); // v(h(repl, r1), a, b)
+		tree.close("b"); // v(h(repl, r1), a)
+		// `a` is a lone column whose neighbor is itself full of rows; splitting
+		// it into rows used to be rejected as "max 3 rows".
+		tree.setActive("a");
+		assert.ok(tree.split("h", "na").ok);
+		assert.deepEqual(tree.panes(), ["repl", "r1", "a", "na"]);
+	});
 });

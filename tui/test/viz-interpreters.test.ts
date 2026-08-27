@@ -43,6 +43,19 @@ describe("renderHexdump", () => {
 		assert.ok(lines[1]!.includes("\x1b[33m03\x1b[0m"), "changed hex byte not marked");
 	});
 
+	it("regression: marks changed bytes without losing hex cells", () => {
+		// Marking 16 bytes all different from the previous stop wraps each cell in
+		// ANSI codes; the row must still render all 16 hex columns (a raw-length
+		// slice used to chop real cells once escape codes inflated the string).
+		const prev = memorySnap(new Array(16).fill(0), "0x4000");
+		const snap = memorySnap(new Array(16).fill(7), "0x4000");
+
+		const lines = renderHexdump(snap, prev, WIDE);
+		const hex = stripAnsi(lines[1]!).split("|")[0]!;
+		const pairs = hex.split(/\s+/).filter(t => /^[0-9a-f]{2}$/i.test(t));
+		assert.equal(pairs.length, 16);
+	});
+
 	it("continues addresses from a numeric base and offsets from a symbolic one", () => {
 		const numeric = renderHexdump(memorySnap(new Array(20).fill(7)), undefined, NARROW);
 		assert.ok(numeric[2]!.trimStart().startsWith("0x4004"));

@@ -3,6 +3,8 @@
  * terminal bitmaps. Pure functions over BindingSnapshot memory fields.
  */
 
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
 import { ViewFlags } from "./types.ts";
 import type {
 	BitmapOptions,
@@ -56,6 +58,12 @@ function rowLabel(base: string, offset: number): string {
 	if (!numeric) return offset === 0 ? base : `+${offset}`;
 	const value = BigInt(base) + BigInt(offset);
 	return "0x" + value.toString(16);
+}
+
+/** Truncate to `width` visible columns, then pad with spaces, ANSI-aware. */
+export function padVisible(line: string, width: number): string {
+	const trimmed = truncateToWidth(line, width, "");
+	return trimmed + " ".repeat(Math.max(0, width - visibleWidth(trimmed)));
 }
 
 /** Read a little-endian integer or float from raw bytes. */
@@ -206,7 +214,8 @@ export function renderHexdump(
 			ascii += markWith(flags, changed, byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".");
 		}
 		const gutter = showGutter ? `${rowLabel(base, offset).padEnd(addrWidth)}  ` : "";
-		const body = `${hex.padEnd(cols * 3 + 2).slice(0, cols * 3 + 2)}${showAscii ? `|${ascii}|` : ""}`;
+		const hexWidth = cols * 3 + 2;
+		const body = `${padVisible(hex, hexWidth)}${showAscii ? `|${ascii}|` : ""}`;
 		rows.push(`${gutter}${body}`);
 	}
 	rows.unshift(memoryHeader(snap, changedCount, undefined, flags));

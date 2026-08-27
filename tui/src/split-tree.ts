@@ -120,19 +120,25 @@ export class SplitTree {
 				}
 				return node;
 			}
-			if (inserted || limitHit || node.dir !== dir) {
+			if (inserted || limitHit) return node;
+			if (node.dir !== dir) {
+				// Opposite direction: descend into the active pane's subtree; the
+				// new pane lands there (a fresh wrapper or a same-direction group).
 				node.children = node.children.map(visit);
-				return node;
-			}
-			if (node.children.length >= MAX_PANES_PER_DIRECTION) {
-				limitHit = true;
 				return node;
 			}
 			// The slot that contains the active pane — possibly via nested
 			// groups — is the one that splits; this keeps the pane's enclosing
 			// cell (not some unrelated sibling) giving up space.
 			const index = subtreeIndex(node.children, this.activePane);
-			if (index === -1) {
+			// A sibling same-direction group that doesn't hold the active pane is
+			// irrelevant to this split: leave it untouched. Rejecting on it (the
+			// old bug) wrongly refused to wrap the active pane in a fresh group
+			// just because a neighboring column was itself full of rows.
+			if (index === -1) return node;
+			// Nearest enclosing same-direction group of the active pane. If it's
+			// full there's nowhere to insert, so reject instead of exceeding the cap.
+			if (node.children.length >= MAX_PANES_PER_DIRECTION) {
 				limitHit = true;
 				return node;
 			}
