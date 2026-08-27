@@ -8,8 +8,8 @@
 import { matchesKey } from "@earendil-works/pi-tui";
 import { View, type ViewOptions } from "../view.ts";
 import { ExpressionBinding } from "../viz/bindings.ts";
-import { INTERPRETERS, renderInterpreter } from "../viz/interpreters.ts";
-import { canReuseObservation, cycleRenderer, DEFAULT_RENDER_SPEC, requiredBytes, withFlagToggle, type RenderSpec } from "../viz/render-spec.ts";
+import { INTERPRETERS, missingRequirements, renderInterpreter } from "../viz/interpreters.ts";
+import { canReuseObservation, cycleAllowed, cycleRenderer, DEFAULT_RENDER_SPEC, RENDERER_ORDER, requiredBytes, withFlagToggle, type RenderSpec } from "../viz/render-spec.ts";
 import type { BindingSnapshot, FetchCtx, LivePane, Rect, ViewFlags } from "../viz/types.ts";
 
 export interface WatchEntry {
@@ -106,11 +106,12 @@ export class WatchListView extends View implements LivePane {
 		return true;
 	}
 
-	/** Cycle the renderer for an entry; refreshes only if the new renderer needs more bytes. */
+	/** Cycle the renderer for an entry, skipping renderers that can't consume the
+	 * current observation; refreshes only if the new renderer needs more bytes. */
 	cycleRendererAt(index: number, back = false): void {
 		const entry = this.entries[index];
 		if (!entry) return;
-		const next = cycleRenderer(entry.renderSpec.rendererId, back);
+		const next = cycleAllowed(entry.renderSpec.rendererId, compatibleRenderers(entry.snap), back);
 		this.setRenderSpec(index, { ...entry.renderSpec, rendererId: next });
 	}
 
@@ -228,4 +229,18 @@ export class WatchListView extends View implements LivePane {
 		if (this.prompt !== null) lines.push(`o> ${this.prompt}_`);
 		return lines;
 	}
+}
+
+/**
+ * Renderers (in display order) that can consume `snap`. When there's no
+ * snapshot yet we can't judge requirements, so return the full catalog so a
+ * pending entry still has a sensible cycle target.
+ */
+function compatibleRenderers(snap: BindingSnapshot | undefined): readonly string[] {
+	if (!snap) return RENDERER_ORDER;
+	return RENDERER_ORDER.filter((id) => {
+		const interpreter = INTERPRETERS[id];
+		if (!interpreter) return false;
+		return missingRequirements(interpreter, snap) === undefined;
+	});
 }

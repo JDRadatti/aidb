@@ -56,6 +56,19 @@ export function cycleRenderer(current: string, back = false): string {
 	return RENDERER_ORDER[next]!;
 }
 
+/**
+ * Next renderer within an allowed subset (e.g. only renderers that can consume
+ * the current observation), forward or backward. Falls back to the first when
+ * `current` isn't in the subset, and to `RENDERER_ORDER` when the subset is empty.
+ */
+export function cycleAllowed(current: string, allowed: readonly string[], back = false): string {
+	const pool = allowed.length > 0 ? allowed : RENDERER_ORDER;
+	const index = pool.indexOf(current);
+	if (index < 0) return back ? pool[pool.length - 1]! : pool[0]!;
+	const next = back ? (index - 1 + pool.length) % pool.length : (index + 1) % pool.length;
+	return pool[next]!;
+}
+
 /** The mutable flag bits in cycle order, least significant first. */
 export const CYCLE_FLAGS: readonly ViewFlags[] = [
 	ViewFlags.ADDRESSES,
