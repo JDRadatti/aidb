@@ -89,6 +89,22 @@ Build order (each step shippable):
 - [ ] Approval gates for side-effectful agent actions (attach, kill, memory writes)
 - [ ] Documented generate → render → snapshot → refine loop for agents
 
+## Visualization (VISUALIZE_PLAN.md)
+
+### Done
+- [x] Phase 0–4: fixtures, observation bindings, capability renderers, byte-oriented renderers
+- [x] Phase 5: watch entries use ExpressionBinding + RenderSpec (default `lines` renderer)
+- [x] Phase A: document `mem <expr> [bytes]` — suffix is raw byte count, default 192
+
+### Deferred — memory load sizing
+- [ ] **B** — explicit tuple suffix syntax (`mem frame 4t3` → 4 tuples × 3 bytes)
+- [ ] **C** — type-aware default byte counts from GDB `type` metadata (`Pixel [4]` → 12 bytes)
+- [ ] **D** — full renderer-driven refetch on `/win pick` and watch entry renderer changes (partial: watch `setRenderSpec` refetches when budget grows)
+
+### Up next
+- [ ] Phase 6: RenderSpec bitflags, `/win pick` options, renderer cycling keybinding, AI-facing registry export
+- [ ] Phase 7: AI inspection/scaffold tools, golden fixtures, plugin boundary
+
 ## Later / stretch
 - [ ] Backend abstraction so lldb-dap can sit behind the same DebuggerAPI
 - [ ] Remote debugging (gdbserver) + record/replay reverse stepping
@@ -122,3 +138,4 @@ LATER:
 
 - gdb features are missing. like si 2 to go si twice
 - asm is not rendered ideally? maybe add some spacing? gdb make clear distinction between src and func name
+- if source file changes since last build, we should notify
