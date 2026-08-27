@@ -269,9 +269,9 @@ export class WindowManager implements Component {
 		this.assignPaneRows(this.tree.root, available);
 		this.bodyRows = this.paneBodyRows.get(this.tree.panes()[0]!) ?? Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, available - TITLE_ROWS);
 		for (const [id, component] of this.deps.panes) {
-			if (id === "repl") continue;
 			const rows = this.getBodyRows(id);
-			if (component instanceof View) component.setViewportHeight(rows);
+			const maybeView = component as Partial<View> & { setViewportHeight?: (rows: number) => void };
+			if (typeof maybeView.setViewportHeight === "function") maybeView.setViewportHeight(rows);
 			else if (isBodyRowsAware(component)) component.setBodyRows(rows);
 		}
 	}

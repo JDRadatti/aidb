@@ -35,7 +35,9 @@
       actually doing — `launching gdb`, `waiting for breakpoint hit (pid 4242)`,
       `reading 256B @ &player`, `restarting after crash` — driven by session state +
       the in-flight request queue; a spinner that never advances also exposes hung requests
-- [ ] Scrollback everywhere: transcript + every pane scrolls independently when focused
+- [x] Scrollback everywhere: transcript (follow-end, Ctrl+Up/Down, Home/End) and
+      every live pane scroll independently; the REPL pane scrolls via its own
+      follow-end viewport
 - [ ] Discoverable shortcuts: contextual key-hint footer for the focused view
       (`?` overlay lists everything); hints derived from keybinding config so remaps stay true
       — REPL shows its keys too (F5/F10/F11…), no buttons needed

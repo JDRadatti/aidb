@@ -17,7 +17,7 @@
 		"env": {}
 	},
 	"keybindings": {
-		"//f": "actions: continue stepOver stepInto stepOut scrollUp scrollDown. Each is an array of chord strings.",
+		"//f": "actions: continue stepOver stepInto stepOut scrollUp scrollDown. Each is an array of chord strings. Ctrl+Up/Ctrl+Down scroll the active pane's scrollback (REPL or a live view).",
 		"actions": {
 			"continue": ["f5"],
 			"stepOver": ["f10"],

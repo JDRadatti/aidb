@@ -26,6 +26,7 @@ import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, ty
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
+import { ReplTranscript } from "./repl-log.ts";
 import { ActivitySpinner } from "./spinner.ts";
 
 const traceDap = process.argv.includes("--trace-dap");
@@ -58,7 +59,7 @@ function setupKeyBindings(cfg: Config): void {
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
 
-const transcript = new Container();
+const transcript = new ReplTranscript();
 const statusBar = new Text("", 0, 0);
 const spinner = new ActivitySpinner(tui, transcript);
 
@@ -72,7 +73,7 @@ const windows = new WindowManager(new SplitTree("repl"), {
 
 function addLine(text: string): void {
 	if (!text) return;
-	transcript.addChild(new Text(text.replace(/\n$/, "")));
+	transcript.addLine(text);
 	tui.requestRender();
 }
 
@@ -280,7 +281,9 @@ function guard(run: (api: DebuggerAPI) => Promise<unknown>): void {
 
 function scrollActivePane(data: string): void {
 	const active = windows.component(windows.active);
+	if (!active) return;
 	if (active instanceof View) active.handleInput(data);
+	else if (active instanceof ReplTranscript) active.handleInput(data);
 }
 
 /** Map raw input to a configured action, or undefined if unbound. */
