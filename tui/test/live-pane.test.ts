@@ -227,6 +227,32 @@ describe("LivePaneView", () => {
 		assert.ok(lines.some((line) => line.includes("41 42")));
 	});
 
+	it("keeps change highlighting across a same-stop duplicate refresh", async () => {
+		// A stop triggers several refreshes (stopped + location + breakpoints).
+		// Each coalesces into one more fetch of the same stop's data; that must
+		// NOT advance prevSnap, or the change highlight disappears immediately.
+		let value = 1;
+		const binding = {
+			kind: "registers" as const,
+			identity: () => "registers",
+			describe: () => "registers",
+			fetch: async (): Promise<BindingSnapshot> => ({
+				kind: "registers",
+				rows: [["rax", `0x${value}`, String(value), "0x4000"]],
+			}),
+		};
+		const view = new LivePaneView(binding, "table", {} as never);
+
+		await view.refreshAll(true); // first stop → no prior state
+		value = 2; // next stop changes rax
+		await view.refreshAll(true);
+		const highlighted = view.render(40).join("\n");
+		assert.match(highlighted, /\x1b\[33m0x2/);
+
+		await view.refreshAll(false); // same stop: location/breakpoints duplicate
+		assert.equal(view.render(40).join("\n"), highlighted, "highlight must survive the duplicate fetch");
+	});
+
 	it("clears plot history and snapshots when a new run begins", async () => {
 		let value = 1;
 		const ctx = makeContext({ evaluate: async () => String(value) });

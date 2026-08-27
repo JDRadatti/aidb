@@ -113,20 +113,20 @@ function wireSession(api: DebuggerAPI): void {
 	api.on("stopped", ({ reason }) => {
 		io.info(`Stopped (${reason}).`);
 		updateStatus();
-		refreshLivePanes(replCtx);
+		refreshLivePanes(replCtx, true);
 	});
 
 	api.on("continued", () => updateStatus());
 
 	api.on("breakpoints-changed", () => {
 		updateStatus();
-		refreshLivePanes(replCtx);
+		refreshLivePanes(replCtx, false);
 	});
 
 	api.on("location", ({ file, line }) => {
 		if (file) io.info(`→ ${file}:${line}`);
 		updateStatus();
-		if (file && line > 0) refreshLivePanes(replCtx);
+		if (file && line > 0) refreshLivePanes(replCtx, false);
 	});
 
 	api.on("session:exited", ({ exitCode }) => {

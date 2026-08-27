@@ -94,7 +94,15 @@ export class LivePaneView extends View implements LivePane {
 		this.centerAssemblyOnResize = false;
 	}
 
-	async refreshAll(): Promise<void> {
+	async refreshAll(advance = false): Promise<void> {
+		// A refresh after a genuinely new stop advances prevSnap to the previous
+		// stop's snapshot so renderers can highlight what changed. We capture it
+		// here — synchronously, before any in-flight fetch commits the new stop's
+		// data — because several events (stopped, location, breakpoints-changed)
+		// each trigger a refresh for the same stop. A coalesced duplicate would
+		// otherwise set prevSnap to the just-fetched (identical) snapshot and
+		// erase the change highlight after a single frame.
+		if (advance) this.prevSnap = this.snap;
 		if (this.fetching) {
 			this.refetch = true;
 			return;
@@ -104,7 +112,6 @@ export class LivePaneView extends View implements LivePane {
 		try {
 			const next = await this.binding.fetch(this.fetchCtx, this.snap);
 			if (generation === this.generation) {
-				this.prevSnap = this.snap;
 					this.snap = next;
 					this.touch();
 					if (next.kind === "assembly" || next.kind === "interleaved") {
@@ -121,7 +128,6 @@ export class LivePaneView extends View implements LivePane {
 			// Bindings promise not to throw; keep the pane alive regardless.
 			const message = error instanceof Error ? error.message : String(error);
 			if (generation === this.generation) {
-				this.prevSnap = this.snap;
 				this.snap = { kind: this.binding.kind, error: message };
 				this.touch();
 			}

@@ -199,10 +199,10 @@ export function isLivePane(component: Component | undefined): component is Compo
  * Re-run every binding in every live pane. Called whenever the target stops —
  * the equivalent of gdb refreshing `display` expressions.
  */
-export function refreshLivePanes(ctx: ReplContext): void {
+export function refreshLivePanes(ctx: ReplContext, advance = false): void {
 	for (const pane of ctx.windows.list()) {
 		const view = ctx.windows.component(pane.id);
-		if (isLivePane(view)) void view.refreshAll();
+		if (isLivePane(view)) void view.refreshAll(advance);
 	}
 }
 

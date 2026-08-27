@@ -223,7 +223,8 @@ export interface BitmapOptions {
 
 /** Any pane content that wants re-evaluation after every stop. */
 export interface LivePane {
-	refreshAll(): Promise<void> | void;
+	/** @param advance true when a genuinely new stop occurred; only then is prevSnap advanced for change highlighting. */
+	refreshAll(advance?: boolean): Promise<void> | void;
 	/** Clear snapshots and run-local binding state without removing the pane. */
 	reset?(): void;
 }

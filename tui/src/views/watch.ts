@@ -124,7 +124,14 @@ export class WatchListView extends View implements LivePane {
 		this.touch();
 	}
 
-	async refreshAll(): Promise<void> {
+	async refreshAll(advance = false): Promise<void> {
+		// Capture the previous stop's snapshots before any fetch so a redundant
+		// second refresh for the same stop (stopped + location + breakpoints)
+		// cannot overwrite prevSnap with the just-fetched identical snapshot and
+		// erase the change highlight.
+		if (advance) {
+			for (const entry of this.entries) entry.prevSnap = entry.snap;
+		}
 		await Promise.all(this.entries.map((_, index) => this.refreshEntry(index)));
 	}
 
@@ -203,7 +210,6 @@ export class WatchListView extends View implements LivePane {
 		try {
 			const snap = await binding.fetch(this.fetchCtx);
 			if (this.entries[index] !== entry) return;
-			entry.prevSnap = entry.snap;
 			entry.snap = snap;
 			entry.pending = false;
 			this.updateDisplay(entry, 120);
