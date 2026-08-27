@@ -1,5 +1,4 @@
 import {
-	CombinedAutocompleteProvider,
 	Container,
 	KeybindingsManager,
 	ProcessTerminal,
@@ -23,6 +22,7 @@ import {
 	type ConfigSources,
 } from "./config.ts";
 import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, type ReplIO } from "./repl.ts";
+import { AidbCompletionProvider, buildCommandRegistry } from "./slash.ts";
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
@@ -237,11 +237,12 @@ function persistHistory(entry: string): void {
 }
 
 const editor = new AidbEditor(tui, createEditorTheme(config.theme));
-editor.setAutocompleteProvider(new CombinedAutocompleteProvider(undefined, process.cwd()));
+editor.setAutocompleteMaxVisible(10);
+editor.setAutocompleteProvider(new AidbCompletionProvider(buildCommandRegistry(), replCtx, process.cwd()));
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
-attachDropdownOverlay(tui, editor);
+attachDropdownOverlay(tui, editor, { maxHeight: "80%" });
 
 // Seed this session's history from the persisted file (most-recent-first).
 (function seedHistory(): void {

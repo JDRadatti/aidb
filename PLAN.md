@@ -42,10 +42,17 @@
 
 ## Slash Autocomplete
 
-- [ ] Show all slash commands after `/`.
-- [ ] Narrow command suggestions as input is typed, for example `/wi` to
+- [x] Show all slash commands after `/`.
+- [x] Narrow command suggestions as input is typed, for example `/wi` to
   `/win`.
-- [ ] Provide context-aware suggestions for `/win` subcommands, pane targets,
+- [x] Provide context-aware suggestions for `/win` subcommands, pane targets,
   visualizer types, and options.
-- [ ] Preserve the existing overlay behavior so suggestions do not change
+  - `/win load <pane> <what>` completes panes then visualizers (`regs · mem
+    · plot · tree · source · asm · iasm`); `/win pick` completes interpreters
+    and `+flags`; `/switch`, `/remove`, `/launch` complete panes,
+    breakpoints, and paths respectively.
+  - Completion is token-aware (never erases earlier arguments) and delegates
+    command-name fuzzy matching, file paths, and `@` fuzzy files to the stock
+    pi-tui `CombinedAutocompleteProvider`.
+- [x] Preserve the existing overlay behavior so suggestions do not change
   document height.
