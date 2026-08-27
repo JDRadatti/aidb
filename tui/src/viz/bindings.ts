@@ -57,21 +57,38 @@ export class ExpressionBinding implements Binding {
 			namedVariables: info.namedVariables,
 			indexedVariables: info.indexedVariables,
 		};
-		if (!info.memoryReference) {
+		let memoryReference = info.memoryReference;
+		// GDB's DAP `evaluate` only exposes a memoryReference for address
+		// expressions; on an array/struct it returns `result: ""` and no
+		// address. Fall back to `&<expr>` for aggregate/pointer types so the
+		// byte-oriented renderers see the raw bytes (`&frame`, `&message`,
+		// `&sample`). Scalars (non-empty result, scalar type) are left alone.
+		if (!memoryReference && looksLikeAddressable(info.type)) {
+			try {
+				const addressInfo = await ctx.evaluateDetailed(`&${this.expr}`);
+				if (addressInfo.memoryReference) {
+					memoryReference = addressInfo.memoryReference;
+					snapshot.memoryReference = addressInfo.memoryReference;
+					snapshot.value = (snapshot.value || addressInfo.result);
+				}
+			} catch {
+				// Not addressable — keep the value-only observation.
+			}
+		}
+		if (!memoryReference) {
 			snapshot.info = "raw memory unavailable for this expression";
 			return snapshot;
 		}
-
 		try {
-			const read = await ctx.readMemory(info.memoryReference, this.byteCount, this.offset);
+			const read = await ctx.readMemory(memoryReference, this.byteCount, this.offset);
 			snapshot.address = read.address;
 			snapshot.bytes = read.data;
 		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			snapshot.info = `raw memory unavailable: ${detail}`;
-		}
-		return snapshot;
+		const detail = error instanceof Error ? error.message : String(error);
+		snapshot.info = `raw memory unavailable: ${detail}`;
 	}
+	return snapshot;
+}
 }
 
 /**
@@ -485,4 +502,14 @@ function sameAddress(left: string, right: string): boolean {
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Heuristic for whether gdb might expose a memoryReference for `&<expr>`:
+ * array/struct/union/enum types, pointers, and C-strings. Scalars like `int`
+ * are skipped so we don't burn an extra evaluate for every simple value.
+ */
+function looksLikeAddressable(type: string | undefined): boolean {
+	if (!type) return false;
+	return /\[\d*\]|\*|\b(struct|class|union|enum)\b|\bchar\b/.test(type);
 }

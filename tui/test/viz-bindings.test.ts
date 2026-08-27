@@ -92,6 +92,28 @@ describe("ExpressionBinding", () => {
 		assert.match(snap.info!, /unmapped/);
 		assert.equal(snap.error, undefined);
 	});
+
+	it("falls back to &expr when the evaluate lacks an address (gdb arrays)", async () => {
+		const calls: string[] = [];
+		const snap = await new ExpressionBinding("frame", 12).fetch(makeCtx({
+			evaluateDetailed: async (expr) => {
+				calls.push(expr);
+				if (expr === "frame") return { result: "", type: "struct Pixel [4]", variablesReference: 4 };
+				return { result: "0x601000 <frame>", type: "struct Pixel (*)[4]", variablesReference: 10, memoryReference: "0x601000" };
+			},
+			readMemory: async (expression, count, offset) => {
+				calls.push(`read:${expression}:${count}:${offset ?? 0}`);
+				return { address: "0x601000", data: new Uint8Array([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]) };
+			},
+		}));
+
+		assert.deepEqual(calls, ["frame", "&frame", "read:0x601000:12:0"]);
+		assert.equal(snap.value, "0x601000 <frame>");
+		assert.equal(snap.type, "struct Pixel [4]");
+		assert.equal(snap.memoryReference, "0x601000");
+		assert.deepEqual(Array.from(snap.bytes!), [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+		assert.equal(snap.error, undefined);
+	});
 });
 
 describe("SeriesBinding", () => {
