@@ -260,6 +260,9 @@ tui.addChild(statusBar);
 
 tui.setFocus(editor);
 
+/** vim navigation keys routed to the active pane when the editor is empty. */
+const PANE_NAV_KEYS = new Set<string>(["end", "home", "ctrl+d", "ctrl+u"]);
+
 /** Resolve an Action -> handler, guarding on the target being stopped. */
 const actionHandlers: Record<Action, (data: string) => void> = {
 	continue: () => guard((api) => spinner.run("continuing", () => api.continue())),
@@ -310,6 +313,14 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 	const action = actionFor(data);
 	if (action) {
 		actionHandlers[action](data);
+		return { consume: true };
+	}
+
+	// Unbound pane-navigation keys: when the editor isn't being typed into,
+	// end/home and Ctrl+D/U scroll the ACTIVE pane (vim-style) instead of
+	// falling through to the editor. Letters stay typable.
+	if (!editor.getText() && PANE_NAV_KEYS.has(data)) {
+		scrollActivePane(data);
 		return { consume: true };
 	}
 
