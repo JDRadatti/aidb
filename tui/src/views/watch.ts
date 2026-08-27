@@ -9,8 +9,8 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { View, type ViewOptions } from "../view.ts";
 import { ExpressionBinding } from "../viz/bindings.ts";
 import { INTERPRETERS, renderInterpreter } from "../viz/interpreters.ts";
-import { canReuseObservation, DEFAULT_RENDER_SPEC, requiredBytes, type RenderSpec } from "../viz/render-spec.ts";
-import type { BindingSnapshot, FetchCtx, LivePane, Rect } from "../viz/types.ts";
+import { canReuseObservation, cycleRenderer, DEFAULT_RENDER_SPEC, requiredBytes, withFlagToggle, type RenderSpec } from "../viz/render-spec.ts";
+import type { BindingSnapshot, FetchCtx, LivePane, Rect, ViewFlags } from "../viz/types.ts";
 
 export interface WatchEntry {
 	expr: string;
@@ -38,7 +38,7 @@ function formatWatchLine(entry: WatchEntry, width: number): { text: string; erro
 	const interpreter = INTERPRETERS[entry.renderSpec.rendererId];
 	if (!interpreter) return { text: `✗ unknown renderer '${entry.renderSpec.rendererId}'`, error: true };
 
-	const lines = renderInterpreter(interpreter, entry.snap, entry.prevSnap, rect);
+	const lines = renderInterpreter(interpreter, entry.snap, entry.prevSnap, rect, entry.renderSpec.flags);
 	const text = stripAnsi(lines.join(" ")).trim() || "—";
 	const error = !!entry.snap.error || text.startsWith("✗");
 	return { text, error };
@@ -104,6 +104,23 @@ export class WatchListView extends View implements LivePane {
 			this.touch();
 		}
 		return true;
+	}
+
+	/** Cycle the renderer for an entry; refreshes only if the new renderer needs more bytes. */
+	cycleRendererAt(index: number, back = false): void {
+		const entry = this.entries[index];
+		if (!entry) return;
+		const next = cycleRenderer(entry.renderSpec.rendererId, back);
+		this.setRenderSpec(index, { ...entry.renderSpec, rendererId: next });
+	}
+
+	/** Flip one render flag on an entry; render-only, so never refetches. */
+	toggleFlagAt(index: number, flag: ViewFlags): void {
+		const entry = this.entries[index];
+		if (!entry) return;
+		entry.renderSpec = withFlagToggle(entry.renderSpec, flag);
+		this.updateDisplay(entry, 120);
+		this.touch();
 	}
 
 	async refreshAll(): Promise<void> {

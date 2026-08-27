@@ -9,6 +9,7 @@ import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView } from "./views/watch.ts";
 import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
+import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
 
@@ -248,6 +249,17 @@ function parseMemLoadSpec(argument: string): { binding: Binding; interpreterId: 
 		}
 	}
 	return { binding: new MemoryBinding(expr, byteCount), interpreterId: "hexdump" };
+}
+
+/** Resolve a `/win pick +<name>` flag name to its ViewFlags bit. */
+function flagBit(name: string): ViewFlags | undefined {
+	for (const [raw, meta] of Object.entries(VIEW_FLAG_META)) {
+		if (meta.name === name) {
+			const value = Number(raw);
+			return Number.isInteger(value) && Number.isFinite(value) ? value : undefined;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -732,22 +744,26 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 		case "pick": {
 			let ref: string | undefined;
 			let interpreterId: string | undefined;
+			let flagName: string | undefined;
 			for (const word of rest) {
 				if (INTERPRETERS[word]) interpreterId = word;
+				else if (word.startsWith("+") && flagName === undefined && flagBit(word.slice(1)) !== undefined) flagName = word.slice(1);
 				else if (ref === undefined) ref = word;
 				else {
-					io.error(`Usage: /win pick [idx|name] [${Object.keys(INTERPRETERS).join("|")}]`);
+					io.error(`Usage: /win pick [idx|name] [${Object.keys(INTERPRETERS).join("|")}] [+flag]`);
 					return;
 				}
 			}
-			if (!interpreterId) {
+			if (interpreterId === undefined && flagName === undefined) {
 				const current = ref === undefined ? undefined : windows.component(windows.resolve(ref) ?? "");
 				io.line("Interpreters:");
 				for (const { id, title } of Object.values(INTERPRETERS)) {
 					const marker = current instanceof LivePaneView && current.getInterpreterId() === id ? " *" : "";
 					io.line(`  ${(id + marker).padEnd(15)} ${title}`);
 				}
-				io.info("Swap one with: /win pick <idx|name> <interpreter>");
+				io.line("Flags:");
+				for (const { name, description } of Object.values(VIEW_FLAG_META)) io.line(`  +${name}  ${description}`);
+				io.info("Swap one: /win pick <idx|name> <interpreter>; toggle: /win pick <idx|name> +flag");
 				return;
 			}
 			const target = windows.resolve(ref ?? windows.active);
@@ -758,6 +774,17 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			const component = windows.component(target);
 			if (!(component instanceof LivePaneView)) {
 				io.error(`Pane '${target}' is not a live pane. Bind one first: /win load ${target} regs`);
+				return;
+			}
+			if (flagName !== undefined) {
+				const bit = flagBit(flagName)!;
+				component.toggleFlag(bit);
+				ctx.requestRender();
+				io.success(`'${target}' ${VIEW_FLAG_META[bit]!.description}`);
+				return;
+			}
+			if (interpreterId === undefined) {
+				io.error("Nothing to pick: specify an interpreter or a +flag.");
 				return;
 			}
 			component.setInterpreter(interpreterId);

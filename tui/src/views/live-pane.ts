@@ -12,12 +12,14 @@
 
 import { View, type ViewOptions } from "../view.ts";
 import { INTERPRETERS, renderInterpreter } from "../viz/interpreters.ts";
+import { ViewFlags } from "../viz/types.ts";
 import type { Binding, BindingSnapshot, FetchCtx, LivePane, Rect } from "../viz/types.ts";
 
 export class LivePaneView extends View implements LivePane {
 	private readonly binding: Binding;
 	private fetchCtx: FetchCtx;
 	private interpreterId: string;
+	private flags: ViewFlags | undefined;
 	private snap: BindingSnapshot | undefined;
 	private prevSnap: BindingSnapshot | undefined;
 	private fetching = false;
@@ -27,10 +29,11 @@ export class LivePaneView extends View implements LivePane {
 	/** Keep the first assembly location centered through the initial pane resize. */
 	private centerAssemblyOnResize = false;
 
-	constructor(binding: Binding, interpreterId: string, fetchCtx: FetchCtx, options: ViewOptions = {}) {
+	constructor(binding: Binding, interpreterId: string, fetchCtx: FetchCtx, options: ViewOptions = {}, flags?: ViewFlags) {
 		super(options.id ?? "live", { ...options, title: options.title ?? LivePaneView.titleFor(binding, interpreterId) });
 		this.binding = binding;
 		this.fetchCtx = fetchCtx;
+		this.flags = flags;
 		this.interpreterId = "";
 		this.setInterpreter(interpreterId);
 	}
@@ -41,6 +44,19 @@ export class LivePaneView extends View implements LivePane {
 
 	getInterpreterId(): string {
 		return this.interpreterId;
+	}
+
+	/** Current render flags; undefined means "use the renderer's defaults". */
+	getFlags(): ViewFlags | undefined {
+		return this.flags;
+	}
+
+	/** Flip one render flag; render-only, so no refetch occurs. Starts from the
+	 * renderer's declared defaults so toggling one flag keeps the others on. */
+	toggleFlag(flag: ViewFlags): void {
+		const base = this.flags ?? (INTERPRETERS[this.interpreterId]?.defaultFlags ?? ViewFlags.None);
+		this.flags = base ^ flag;
+		this.touch();
 	}
 
 	/** Cache key of the mounted binding; tests and /win list use this. */
@@ -122,6 +138,6 @@ export class LivePaneView extends View implements LivePane {
 		const interpreter = INTERPRETERS[this.interpreterId];
 		if (!interpreter) return [`✗ unknown view '${this.interpreterId}'`];
 		const rect: Rect = { width, height: this.getViewportHeight() };
-		return renderInterpreter(interpreter, this.snap, this.prevSnap, rect);
+		return renderInterpreter(interpreter, this.snap, this.prevSnap, rect, this.flags);
 	}
 }
