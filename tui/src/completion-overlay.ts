@@ -67,6 +67,19 @@ export class AidbEditor extends Editor {
 	/** Rows the editor itself occupied in the last render (dropdown excluded). */
 	lastHeight = 3;
 
+	/**
+	 * Seed the up/down history from a persisted file.
+	 * The file stores most-recent-first (matching `Editor.history`, where
+	 * index 0 is newest), so entries are appended in that order.
+	 */
+	loadHistory(entries: readonly string[]): void {
+		const rec = this as unknown as Record<string, unknown>;
+		if (!Array.isArray(rec.history)) return;
+		rec.history.push(
+			...entries.filter((x): x is string => typeof x === "string" && x.trim().length > 0),
+		);
+	}
+
 	render(width: number): string[] {
 		const result = super.render(width);
 		this.internals ??= internalsOf(this);

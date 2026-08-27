@@ -12,6 +12,7 @@ import { INTERPRETERS } from "./viz/interpreters.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
+import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
 
 export interface ReplIO {
 	line(text: string): void;
@@ -29,6 +30,10 @@ export interface ReplContext {
 	io: ReplIO;
 	windows: WindowManager;
 	spinner?: ActivitySpinner;
+	/** Live config; reassigned by `reloadConfig`. */
+	config: Config;
+	configSources: ConfigSources;
+	reloadConfig(): { config: Config; sources: ConfigSources };
 }
 
 function withActivity<T>(ctx: ReplContext, label: string, operation: () => Promise<T>): Promise<T> {
@@ -43,11 +48,11 @@ const HELP = [
 	"                              or a function name (alias: b)",
 	"  info breakpoints            list breakpoints (alias: i b)",
 	"  delete [id...]              remove breakpoints, all of them if no ids (alias: d)",
-	"  continue                    resume execution (F5, alias: c)",
-	"  next                        step over (F10, alias: n)",
-	"  step                        step into (F11, alias: s)",
+	"  continue                    resume execution (<continue>, alias: c)",
+	"  next                        step over (<stepOver>, alias: n)",
+	"  step                        step into (<stepInto>, alias: s)",
 	"  si                          step one machine instruction (GDB alias: stepi)",
-	"  finish                      step out (Shift+F11)",
+	"  finish                      step out (<stepOut>)",
 	"  bt                          backtrace (aliases: backtrace, where)",
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
 	"  set <var> = <val>           assign in the current frame (uses `set variable` syntax)",
@@ -108,16 +113,22 @@ const WIN_HELP = [
 
 /**
  * `help` prints the general sheet; `help <topic>` digs into one area.
+ * Action keys are filled in from the live config so remaps stay true.
  */
-function showHelp(topic: string | undefined, io: ReplIO): void {
+function showHelp(topic: string | undefined, io: ReplIO, actions: Config["keybindings"]["actions"]): void {
 	const normalized = topic?.trim().toLowerCase();
 	if (normalized === "win" || normalized === "window" || normalized === "windows") {
 		io.line(WIN_HELP);
 	} else if (normalized) {
 		io.error(`No help topic '${topic}'. Topics: win`);
 	} else {
-		io.line(HELP);
+		io.line(fillKeys(HELP, actions));
 	}
+}
+
+/** Substitute `<action>` tokens with the configured key chord labels. */
+function fillKeys(sheet: string, actions: Config["keybindings"]["actions"]): string {
+	return sheet.replace(/<\w+>/g, (token) => actionKeyLabel(actions, token.slice(1, -1) as Action));
 }
 
 /**
@@ -646,7 +657,7 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 			break;
 
 		case "help":
-			showHelp(args, io);
+			showHelp(args, io, ctx.config.keybindings.actions);
 			break;
 
 		case "status":
@@ -932,7 +943,7 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 
 	switch (command) {
 		case "help":
-			showHelp(args, io);
+			showHelp(args, io, ctx.config.keybindings.actions);
 			break;
 
 		case "run":
@@ -1028,6 +1039,10 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			await handleWin(args, ctx);
 			break;
 
+		case "config":
+			await handleConfig(args, ctx);
+			break;
+
 		case "watch":
 			await handleWatch(args, ctx);
 			break;
@@ -1039,6 +1054,30 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 
 		default:
 			io.error(`Unknown command: /${command}. Type /help for commands.`);
+	}
+}
+
+/**
+ * `/config` — inspect (default) or reload (~/.aidbrc + ./.aidb.json) files.
+ */
+async function handleConfig(args: string, ctx: ReplContext): Promise<void> {
+	const io = ctx.io;
+	const terms = args.trim().split(/\s+/);
+	if (terms[0] === "reload") {
+		const { sources } = ctx.reloadConfig();
+		io.success("Config reloaded (theme + keybindings applied).");
+		for (const issue of sources.issues) io.warning(`config ${issue.path}: ${issue.message}`);
+		return;
+	}
+	const { theme, gdb, sessions } = ctx.config;
+	const origin = (k: string) => ctx.configSources.sectionOrigin[k as keyof Config];
+	io.line("aidb config");
+	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border}`);
+	io.info(`  gdb        (${origin("gdb")}): path=${gdb.path}`);
+	io.info(`  sessions   (${origin("sessions")}): history=${sessions.historyPath}`);
+	if (ctx.configSources.issues.length > 0) {
+		io.info("config issues:");
+		for (const issue of ctx.configSources.issues) io.warning(`  ${issue.path}: ${issue.message}`);
 	}
 }
 

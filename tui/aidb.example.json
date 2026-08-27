@@ -1,0 +1,51 @@
+{
+	"//": "Example aidb config. Copy to ~/.aidbrc (user-wide) or ./.aidb.json (per-project).",
+	"//load": "Both files are JSON; project wins over ~/.aidbrc wins over defaults. A value that is malformed or out of range is reported and dropped, never fatal. `/config` prints the effective config + provenance, `/config reload` re-applies it live.",
+	"theme": {
+		"//f": "ANSI SGR colour codes (0-256). Roles: accent, muted, success, warning, error, border.",
+		"accent": 36,
+		"muted": 90,
+		"success": 32,
+		"warning": 33,
+		"error": 31,
+		"border": 90
+	},
+	"gdb": {
+		"//f": "path + env are honoured by the DAP client; extra gdb argv is reserved (core hardcodes --interpreter=dap --nx --quiet).",
+		"path": "gdb",
+		"args": [],
+		"env": {}
+	},
+	"keybindings": {
+		"//f": "actions: continue stepOver stepInto stepOut scrollUp scrollDown. Each is an array of chord strings.",
+		"actions": {
+			"continue": ["f5"],
+			"stepOver": ["f10"],
+			"stepInto": ["f11"],
+			"stepOut": ["shift+f11"],
+			"scrollUp": ["ctrl+up"],
+			"scrollDown": ["ctrl+down"]
+		},
+		"//editor": "pi-tui built-in keybinding overrides; the editor reads these live.",
+		"editor": {
+			"tui.editor.historyPrevious": ["ctrl+p"],
+			"tui.editor.historyNext": ["ctrl+n"]
+		}
+	},
+	"defaults": {
+		"//f": "Reserved placeholders for command defaults (break style, step behavior).",
+		"breakStyle": "line",
+		"stepBehavior": "continue"
+	},
+	"sessions": {
+		"//f": "historyPath is persisted across runs. sessionDir is reserved for full session snapshots.",
+		"historyPath": "/home/you/.aidb_history",
+		"sessionDir": "/home/you/.config/aidb/sessions"
+	},
+	"windows": {
+		"//f": "Reserved: layout presets, manifest dir, refresh policy. Parsed but unused."
+	},
+	"agent": {
+		"//f": "Reserved: tool permissions, approval gates. Parsed but unused."
+	}
+}

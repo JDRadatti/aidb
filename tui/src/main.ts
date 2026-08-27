@@ -12,8 +12,16 @@ import {
 } from "@earendil-works/pi-tui";
 import { createDebugger } from "@earendil-works/pi-debugger-core";
 import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
+import * as fs from "node:fs";
 import { AidbEditor, attachDropdownOverlay } from "./completion-overlay.ts";
-import { colors, createEditorTheme } from "./theme.ts";
+import { colors, applyTheme, createEditorTheme } from "./theme.ts";
+import {
+	loadConfig,
+	resolveAction,
+	type Action,
+	type Config,
+	type ConfigSources,
+} from "./config.ts";
 import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, type ReplIO } from "./repl.ts";
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
@@ -21,25 +29,39 @@ import { WindowManager } from "./window-manager.ts";
 import { ActivitySpinner } from "./spinner.ts";
 
 const traceDap = process.argv.includes("--trace-dap");
+
+// ---------- config (load once; /config reload re-runs this) ----------
+let config: Config;
+let configSources: ConfigSources;
+
+/** Load config files, then apply theme + keybindings. */
+function loadAndApplyConfig(): { config: Config; sources: ConfigSources } {
+	const loaded = loadConfig();
+	applyTheme(loaded.config.theme);
+	setupKeyBindings(loaded.config);
+	return loaded;
+}
+function setupKeyBindings(cfg: Config): void {
+	setKeybindings(
+		new KeybindingsManager(TUI_KEYBINDINGS, cfg.keybindings.editor),
+	);
+}
+{
+	const loaded = loadAndApplyConfig();
+	config = loaded.config;
+	configSources = loaded.sources;
+	for (const issue of configSources.issues) {
+		console.error(`aidb config: ${issue.path}: ${issue.message}`);
+	}
+}
+
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
-
-setKeybindings(
-	new KeybindingsManager(TUI_KEYBINDINGS, {
-		"tui.editor.historyPrevious": ["ctrl+p"],
-		"tui.editor.historyNext": ["ctrl+n"],
-	}),
-);
 
 const transcript = new Container();
 const statusBar = new Text("", 0, 0);
 const spinner = new ActivitySpinner(tui, transcript);
 
-/**
- * The window system is being proven in isolation: blank panes render as
- * colored index slabs (see windows-plan.html). Real views register here once
- * the mechanics are trusted.
- */
 const panesById = new Map<string, Component>();
 panesById.set("repl", transcript);
 const windows = new WindowManager(new SplitTree("repl"), {
@@ -62,7 +84,15 @@ const io: ReplIO = {
 	error: (text) => addLine(colors.error(text)),
 };
 
-let dbg = createDebugger({ traceDap });
+let dbg = createDebugger(dapConfig());
+
+function dapConfig() {
+	return {
+		traceDap,
+		gdbPath: config.gdb.path,
+		...(Object.keys(config.gdb.env).length > 0 ? { env: config.gdb.env } : {}),
+	};
+}
 
 function wireSession(api: DebuggerAPI): void {
 	api.on("output", ({ category, output }) => {
@@ -82,7 +112,6 @@ function wireSession(api: DebuggerAPI): void {
 	api.on("stopped", ({ reason }) => {
 		io.info(`Stopped (${reason}).`);
 		updateStatus();
-		// Live panes re-evaluate on every stop, like gdb's `display`.
 		refreshLivePanes(replCtx);
 	});
 
@@ -133,7 +162,7 @@ function updateStatus(): void {
 
 async function resetDebugger(): Promise<DebuggerAPI> {
 	await dbg.cleanup();
-	dbg = createDebugger({ traceDap });
+	dbg = createDebugger(dapConfig());
 	wireSession(dbg.api);
 	resetLivePanes(replCtx);
 	return dbg.api;
@@ -156,6 +185,18 @@ async function shutdown(): Promise<void> {
 	}
 }
 
+/**
+ * Reload config files and re-apply theme + keybindings live. The editor's
+ * theme (border/autocomplete) is fixed at construction, so those roles take
+ * effect on restart; output/colour roles and all keybindings apply at once.
+ */
+function reloadConfig(): { config: Config; sources: ConfigSources } {
+	const loaded = loadAndApplyConfig();
+	config = loaded.config;
+	configSources = loaded.sources;
+	return loaded;
+}
+
 const replCtx: ReplContext = {
 	getApi: () => dbg.api,
 	reset: resetDebugger,
@@ -164,6 +205,9 @@ const replCtx: ReplContext = {
 	io,
 	windows,
 	spinner,
+	config,
+	configSources,
+	reloadConfig,
 };
 
 async function submit(raw: string): Promise<void> {
@@ -175,32 +219,77 @@ async function submit(raw: string): Promise<void> {
 	}
 	editor.addToHistory(text);
 	addLine(colors.accent("› ") + text);
+	persistHistory(text);
 	await handleReplInput(text, replCtx);
 	updateStatus();
 }
 
-const editor = new AidbEditor(tui, createEditorTheme());
+/** Append a submitted command to the persisted history file (best-effort). */
+function persistHistory(entry: string): void {
+	const file = config.sessions.historyPath;
+	if (!file) return;
+	try {
+		fs.appendFileSync(file, `${entry}\n`);
+	} catch {
+		/* history persistence is best-effort */
+	}
+}
+
+const editor = new AidbEditor(tui, createEditorTheme(config.theme));
 editor.setAutocompleteProvider(new CombinedAutocompleteProvider(undefined, process.cwd()));
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
-// The suggestion list renders as an overlay docked above the prompt instead
-// of inline rows, so opening/closing it never scrolls the document or leaves
-// a gap at the bottom of the screen.
 attachDropdownOverlay(tui, editor);
+
+// Seed this session's history from the persisted file (most-recent-first).
+(function seedHistory(): void {
+	try {
+		if (!fs.existsSync(config.sessions.historyPath)) return;
+		const lines = fs.readFileSync(config.sessions.historyPath, "utf8").split("\n");
+		editor.loadHistory(lines);
+	} catch {
+		/* ignore corrupt/inaccessible history */
+	}
+})();
 
 tui.addChild(windows);
 tui.addChild(editor);
 tui.addChild(statusBar);
 
-/**
- * The editor keeps focus permanently — panes never capture keys, so the
- * prompt works no matter what the window layout looks like. Window commands
- * (/switch, /win ...) are typed like everything else.
- */
 tui.setFocus(editor);
 
+/** Resolve an Action -> handler, guarding on the target being stopped. */
+const actionHandlers: Record<Action, (data: string) => void> = {
+	continue: () => guard((api) => spinner.run("continuing", () => api.continue())),
+	stepOver: () => guard((api) => spinner.run("stepping over", () => api.stepOver())),
+	stepInto: () => guard((api) => spinner.run("stepping into", () => api.stepInto())),
+	stepOut: () => guard((api) => spinner.run("stepping out", () => api.stepOut())),
+	scrollUp: (data) => scrollActivePane(data),
+	scrollDown: (data) => scrollActivePane(data),
+};
+
+function guard(run: (api: DebuggerAPI) => Promise<unknown>): void {
+	const api = dbg.api;
+	if (api.getState() !== "stopped") {
+		io.error("Target is not stopped.");
+		return;
+	}
+	void run(api).catch((e) => io.error(String(e.message ?? e)));
+}
+
+function scrollActivePane(data: string): void {
+	const active = windows.component(windows.active);
+	if (active instanceof View) active.handleInput(data);
+}
+
+/** Map raw input to a configured action, or undefined if unbound. */
+function actionFor(data: string): Action | null {
+	return resolveAction(config.keybindings.actions, data);
+}
+
 tui.addInputListener((data): { consume: boolean } | undefined => {
+	// Hard binding: cannot be remapped (interrupts takes priority).
 	if (matchesKey(data, "ctrl+c")) {
 		if (editor.getText()) {
 			editor.setText("");
@@ -210,39 +299,13 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 		void shutdown();
 		return { consume: true };
 	}
-	if (matchesKey(data, "ctrl+up") || matchesKey(data, "ctrl+down")) {
-		const active = windows.component(windows.active);
-		if (active instanceof View) {
-			active.handleInput(data);
-			return { consume: true };
-		}
+
+	const action = actionFor(data);
+	if (action) {
+		actionHandlers[action](data);
+		return { consume: true };
 	}
 
-	const api = dbg.api;
-	const guard = (): boolean => {
-		if (api.getState() !== "stopped") {
-			io.error("Target is not stopped.");
-			return false;
-		}
-		return true;
-	};
-
-	if (matchesKey(data, "f5")) {
-		if (guard()) void spinner.run("continuing", () => api.continue()).catch((e) => io.error(String(e.message ?? e)));
-		return { consume: true };
-	}
-	if (matchesKey(data, "f10")) {
-		if (guard()) void spinner.run("stepping over", () => api.stepOver()).catch((e) => io.error(String(e.message ?? e)));
-		return { consume: true };
-	}
-	if (matchesKey(data, "f11")) {
-		if (guard()) void spinner.run("stepping into", () => api.stepInto()).catch((e) => io.error(String(e.message ?? e)));
-		return { consume: true };
-	}
-	if (matchesKey(data, "shift+f11")) {
-		if (guard()) void spinner.run("stepping out", () => api.stepOut()).catch((e) => io.error(String(e.message ?? e)));
-		return { consume: true };
-	}
 	return undefined;
 });
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { handleReplInput, type ReplContext, type ReplIO } from "../src/repl.ts";
+import { DEFAULT_CONFIG } from "../src/config.ts";
 
 function makeContext() {
 	const messages: string[] = [];
@@ -18,6 +19,9 @@ function makeContext() {
 		requestRender: () => {},
 		io,
 		windows: {} as never,
+		config: DEFAULT_CONFIG,
+		configSources: { issues: [], sectionOrigin: {} as never },
+		reloadConfig: () => ({ config: DEFAULT_CONFIG, sources: { issues: [], sectionOrigin: {} as never } }),
 	};
 	return { ctx, messages };
 }

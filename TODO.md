@@ -20,14 +20,17 @@
 - [x] Typed error taxonomy: core errors vs gdb passthrough, surfaced uniformly in TUI
 
 ## Phase 1 — Ergonomics
-- [ ] Distinct colors: user input vs program stdout vs gdb console vs errors (theme.ts)
-- [ ] Layered config: ~/.aidbrc + ./.aidb.json (theme, gdbPath, keybindings, defaults)
+- [x] Distinct colors: user input vs program stdout vs gdb console vs errors (theme.ts)
+- [x] Layered config: ~/.aidbrc + ./.aidb.json (theme, gdbPath, keybindings, defaults)
         - config is data, not commands — sections:
           `theme` (colors), `gdb` (path/args/env), `keybindings` (action → chords),
           `defaults` (break style, step behavior), `sessions` (history/persistence paths),
           `windows` (layout presets, manifest dir, refresh policy),
-          `agent` (tool permissions, approval gates)
-- [ ] Remappable keybindings (loaded from config)
+          `agent` (tool permissions, approval gates); `windows`/`agent` parsed-but-reserved
+        - `/config` prints effective values + provenance; `/config reload` re-applies live
+- [x] Remappable keybindings: `keybindings.actions` load from config; editor keybindings too;
+      help text derives displayed keys from config
+        - actions: continue / stepOver / stepInto / stepOut / scrollUp / scrollDown
 - [x] State-aware activity spinner (pi-style, not just "Waiting"): label reflects what aidb is
       actually doing — `launching gdb`, `waiting for breakpoint hit (pid 4242)`,
       `reading 256B @ &player`, `restarting after crash` — driven by session state +
@@ -37,7 +40,7 @@
       (`?` overlay lists everything); hints derived from keybinding config so remaps stay true
       — REPL shows its keys too (F5/F10/F11…), no buttons needed
 - [ ] Persistent sessions: breakpoints, watches, window layout survive restarts
-- [ ] Persistent command history across runs
+- [x] Persistent command history across runs (sessions.historyPath)
 - [ ] Multiple concurrent targets behind a SessionManager (attach several, switch focus)
         - unfocused sessions sleep: events buffered/coalesced, FIFO pumps paused, zero polling
 
