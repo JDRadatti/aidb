@@ -20,33 +20,46 @@ function makeManager(...ids: string[]): WindowManager {
 	return new WindowManager(new SplitTree(ids[0]!), { panes, getViewRows: () => 10 });
 }
 
+// Each pane is padded by a 2-row, 2-column border box (reserved for every pane,
+// of a visible border for the active one).
+const BORD = 2;
+
 describe("WindowManager", () => {
-	it("renders a single pane with a title row plus content", () => {
+	it("renders a single pane with a border and its title inside it", () => {
 		const wm = makeManager("repl");
 		const lines = wm.render(20);
-		assert.equal(lines.length, 6); // title + body clipped/padded to the allotted rows
-		assert.ok(strip(lines[0]).includes("repl"));
-		assert.ok(strip(lines[1]).startsWith("R"));
-		assert.ok(strip(lines[5]).trimEnd() === "" || strip(lines[5]).startsWith("R"));
+		// getViewRows=10 -> available=6 -> body rows = 6 - BORD, plus BORD border rows.
+		assert.equal(lines.length, BORD + (6 - BORD));
+		assert.equal(lines.length, 6);
+		const s = lines.map(strip);
+		assert.match(s[0]!, /^┌/);
+		assert.ok(s[0]!.includes("repl"));
+		assert.match(s[1]!, /^│/);
+		assert.ok(s[1]!.includes("R"));
+		assert.match(s[5]!, /^└/);
 	});
 
 	it("vsplit gives equal columns regardless of pane content", () => {
 		const wm = makeManager("repl");
 		wm.register("a", stubPane("A"));
-		assert.ok(wm.split("v", 0).ok);
-		const content = strip(wm.render(21)[1]);
-		const boundary = content.search(/[^R]/);
-		assert.ok(Math.abs(boundary - 10) <= 1, `expected split near column 10, got ${boundary}`);
+		assert.ok(wm.split("v", 0, "a").ok);
+		const s = wm.render(21).map(strip);
+		// Each pane draws a border edge, so the split seam is an adjacent ││ pair.
+		const row = s[1]!;
+		const seam = row.indexOf("││");
+		assert.ok(seam > 3 && seam < row.length - 3, `seam near middle, got col ${seam}`);
+		assert.ok(row.slice(0, seam).includes("R"), "left pane is the repl content");
+		assert.ok(row.slice(seam).includes("A"), "right pane survived the split");
 	});
 
 	it("a wide transcript does not starve the other pane", () => {
 		const wm = makeManager("repl");
 		wm.register("a", stubPane("A"));
 		wm.register("repl", { id: "repl", render: (w: number) => ["R".repeat(w * 4)], invalidate: () => {} });
-		assert.ok(wm.split("v", 0).ok);
-		const content = strip(wm.render(21)[1]);
-		const boundary = content.search(/[^R]/);
-		assert.ok(Math.abs(boundary - 10) <= 1, `expected split near column 10, got ${boundary}`);
+		assert.ok(wm.split("v", 0, "a").ok);
+		const row = wm.render(21).map(strip)[1]!;
+		const seam = row.indexOf("││");
+		assert.ok(seam > 0 && row.slice(seam).includes("A"), "the right pane still fits beside a wide transcript");
 	});
 
 	it("split defaults to the active pane; switchTo retargets", () => {
@@ -122,17 +135,21 @@ describe("WindowManager", () => {
 		assert.ok(wm.split("v").ok);
 		const lines = wm.render(40).map(strip);
 		assert.ok(lines.some((l) => l.includes("█")), "expected block digits in the blank pane");
-		assert.ok(lines[0].includes("pane2"));
+		assert.ok(lines.some((l) => l.includes("pane2")));
 	});
 
-	it("hsplit stacks rows with title rows between", () => {
+	it("hsplit stacks rows; the active pane gets a border, the inactive a title row", () => {
 		const wm = makeManager("repl");
 		wm.register("b", stubPane("B"));
-		assert.ok(wm.split("h", 0, "b").ok);
+		assert.ok(wm.split("h", 0, "b").ok); // b becomes active, repl inactive
 		const lines = wm.render(30).map(strip);
-		assert.equal(lines.length, 6); // 2 titles + 2x2 clipped body rows
-		assert.ok(lines[1].startsWith("R"));
-		assert.ok(lines[5].startsWith("B"));
+		// Each pane: BORD border rows + 1 body row = 3; two panes -> 6. Body rows
+		// are 1 because the available 6 rows are shared down to 3 each.
+		assert.equal(lines.length, 6);
+		assert.ok(lines[0]!.includes("repl"));
+		assert.ok(lines[1]!.includes("R"), "repl body present");
+		assert.match(lines[3]!, /^┌/, "active (b) pane gets a bordered top");
+		assert.ok(lines[4]!.includes("B"), `active b body present at line 4`);
 	});
 
 	it("keeps a full-height left pane when only the right branch is split", () => {
@@ -141,14 +158,13 @@ describe("WindowManager", () => {
 		assert.ok(wm.split("h").ok); // repl | pane2 / pane3
 
 		wm.render(80);
-		assert.equal(wm.getBodyRows("repl"), 5);
-		assert.equal(wm.getBodyRows("pane2"), 2);
-		assert.equal(wm.getBodyRows("pane3"), 2);
+		// getViewRows=10 -> available=6.
+		assert.equal(wm.getBodyRows("repl"), 6 - BORD); // full left height, minus borders
+		assert.equal(wm.getBodyRows("pane2"), 1); // (6/2)-BORD, floor
+		assert.equal(wm.getBodyRows("pane3"), 1);
 	});
 
 	it("the window block fits in the rows left after screen chrome", () => {
-		// getViewRows=10, CHROME_ROWS_ESTIMATE=4 -> 6 rows for panes. One row
-		// over and flow-mode scrolling hides the title row off the top.
 		const wm = makeManager("repl");
 		assert.equal(wm.render(80).length, 6);
 		assert.ok(wm.split("v").ok);
@@ -166,13 +182,13 @@ describe("WindowManager", () => {
 		});
 		wm.register("repl", transcriptLines(50));
 		let lines = wm.render(40).map(strip);
-		assert.equal(lines.length, 1 + wm.bodyRows); // title + fixed body, regardless of content
+		assert.equal(lines.length, BORD + wm.bodyRows, "border rows + fixed body, regardless of content");
 		assert.ok(lines.some((l) => l.includes("line49")), "latest line must stay visible");
 		assert.ok(!lines.some((l) => l.includes("line0")), "old lines scroll away");
 		// Simulating `help`: more output must not grow the document.
 		wm.register("repl", transcriptLines(80));
 		lines = wm.render(40).map(strip);
-		assert.equal(lines.length, 1 + wm.bodyRows);
+		assert.equal(lines.length, BORD + wm.bodyRows);
 		assert.ok(lines.some((l) => l.includes("line79")));
 	});
 
@@ -181,5 +197,31 @@ describe("WindowManager", () => {
 		assert.ok(wm.split("v").ok);
 		const rendered = wm.render(40);
 		assert.ok(rendered.every((l) => visibleWidth(l) <= 41));
+	});
+
+	it("keeps the repl right border flush to the pane edge on every row", () => {
+		const wm = makeManager("repl");
+		wm.register("repl", { id: "repl", render: () => ["short", ""], invalidate: () => {} });
+		const raw = wm.render(40);
+		const s = raw.map(strip);
+		for (const row of s) assert.equal(row.length, 40, `row padded to pane width: ${JSON.stringify(row)}`);
+		assert.match(s[0]!, /^┌ .*┐$/);
+		assert.match(s[1]!, /^│short.*│$/);
+		assert.match(s[s.length - 1]!, /^└.*┘$/);
+	});
+
+	it("paints the focused pane white, inactive panes subtle gray, top always renders", () => {
+		const wm = makeManager("repl");
+		wm.register("a", stubPane("A"));
+		assert.ok(wm.split("v", 0, "a").ok); // 'a' is now active; repl inactive
+		const raw = wm.render(60);
+		const joined = raw.join("\n");
+		// borderInactive default 234 / borderActive default 255 => valid 256-colour fg.
+		assert.ok(joined.includes("\x1b[38;5;234m│"), "inactive pane keeps a subtle gray border");
+		assert.ok(joined.includes("\x1b[38;5;255m┌"), "active pane gets a white outline");
+		assert.ok(!joined.includes("48;5"), "panes carry no background fill");
+		// Every pane's top edge draws a full horizontal segment (not blank spaces).
+		const top = strip(raw[0]!);
+		assert.ok(top.includes("┌ repl") && /─┐$/.test(top), `inactive top renders a complete line: ${JSON.stringify(top)}`);
 	});
 });

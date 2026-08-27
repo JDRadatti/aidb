@@ -6,8 +6,9 @@
  * - Panes are addressed BY INDEX (position in `tree.panes()` order) from
  *   explicit commands like /switch 1 or /win close 2. Indices shift when a
  *   pane before them closes — /win list shows the current mapping.
- * - Every pane is tinted with its index color and titled `idx name`; blank
- *   panes render an IndexSlab so geometry is verifiable at a glance.
+ * - Every pane is framed by a box outline (white when active, subtle gray
+ *   otherwise) and titled with its name; blank panes render an IndexSlab so
+ *   geometry is verifiable at a glance.
  * Leader keys (tmux-style) are a planned layer on top; see windows-plan.html.
  */
 
@@ -15,11 +16,15 @@ import { HStack, VStack, type Component, type StackChild } from "@earendil-works
 import { LAYOUT_NODE, type LayoutNode } from "@earendil-works/pi-tui/dist/layout-node.js";
 import { MAX_PANES_PER_DIRECTION, SplitTree, type PaneId, type SplitDir, type SplitResult, type TreeNode } from "./split-tree.ts";
 import { View } from "./view.ts";
-import { IndexSlab, tint, type BodyRowsAware } from "./pane-slab.ts";
+import { IndexSlab, padTo, type BodyRowsAware } from "./pane-slab.ts";
+import { colors } from "./theme.ts";
 
-export const MIN_PANE_WIDTH = 10;
+	export const MIN_PANE_WIDTH = 10;
 export const MIN_PANE_HEIGHT = 3;
-const TITLE_ROWS = 1;
+const BORDER_COLS = 2;
+const BORDER_ROWS = 2;
+
+const BORDER_CHARS = { tl: "\u250c", tr: "\u2510", bl: "\u2514", br: "\u2518", h: "\u2500", v: "\u2502" } as const;
 
 /**
  * Rows of screen chrome below the panes: editor (top border, input line,
@@ -73,7 +78,7 @@ class WeightedHStack extends HStack {
 	}
 }
 
-/** Title row + background-tinted body. The active pane's title gets a marker. */
+	/** Title row + bordered body. The active pane gets a white outline. */
 class PaneChrome implements Component {
 	private readonly paneId: PaneId;
 	private readonly child: Component;
@@ -85,15 +90,15 @@ class PaneChrome implements Component {
 		this.manager = manager;
 	}
 
-	private idx(): number {
-		return this.manager.indexOf(this.paneId);
-	}
-
 	render(width: number): string[] {
-		const idx = this.idx();
+		const active = this.manager.tree.active === this.paneId;
 		const bodyRows = this.manager.getBodyRows(this.paneId);
-		const title = `${this.child instanceof View ? this.child.title || this.paneId : this.paneId}${this.manager.tree.active === this.paneId ? " *" : ""}`;
-		let body = this.child.render(width);
+		// Slab placeholders are only registered during layout (after sizing), so
+		// they'd overflow on their first render; size them at draw time too.
+		if (isBodyRowsAware(this.child)) this.child.setBodyRows(bodyRows);
+		const title = this.child instanceof View ? (this.child.title || this.paneId) : this.paneId;
+		const innerWidth = Math.max(0, width - BORDER_COLS);
+		let body = this.child.render(innerWidth);
 		// Panes are fixed-height: clip overflow to the allotted rows, keeping
 		// the tail (the latest output for a transcript). Without this a long
 		// transcript stretches the whole document and pushes sibling panes
@@ -101,9 +106,30 @@ class PaneChrome implements Component {
 		if (bodyRows > 0 && body.length > bodyRows) {
 			body = body.slice(-bodyRows);
 		}
-		// Pad short panes so backgrounds stay continuous beside taller siblings.
+		// Pad short panes so rows stay the same height beside taller siblings.
 		while (body.length < bodyRows) body.push("");
-		return [tint(` ${title}`, width, idx), ...body.map((line) => tint(line, width, idx))];
+		// Panes carry no background fill; pad each row (ANSI-aware) so border
+		// glyphs stay flush with the pane's edges on every line.
+		const paint = (line: string): string => padTo(line, innerWidth);
+
+		// Border stroke: white outline for the focused pane, subtle gray otherwise.
+		const stroke = active ? colors.borderActive : colors.borderInactive;
+		const left = stroke(BORDER_CHARS.v);
+		const right = stroke(BORDER_CHARS.v);
+		const middle = body.map((line) => left + paint(line) + right);
+
+		// Top border carries the title; both panes draw a full horizontal line so
+		// the top edge never reads as missing. The whole frame (corners, the
+		// title run, the horizontal segments) shares the stroke color — otherwise
+		// the horizontal bars render the terminal's default foreground and look
+		// white even when the pane is inactive.
+		let titleRun = ` ${title} `;
+		if (titleRun.length > innerWidth) titleRun = titleRun.slice(0, innerWidth);
+		const strokePad = (n: number): string => stroke(BORDER_CHARS.h.repeat(Math.max(0, n)));
+		const top = stroke(BORDER_CHARS.tl) + stroke(titleRun) + strokePad(innerWidth - Math.min(titleRun.length, innerWidth)) + stroke(BORDER_CHARS.tr);
+
+		const bottom = stroke(BORDER_CHARS.bl) + strokePad(innerWidth) + stroke(BORDER_CHARS.br);
+		return [top, ...middle, bottom];
 	}
 
 	invalidate(): void {
@@ -267,7 +293,7 @@ export class WindowManager implements Component {
 		const available = Math.max(MIN_PANE_HEIGHT, getViewRows() - CHROME_ROWS_ESTIMATE);
 		this.paneBodyRows.clear();
 		this.assignPaneRows(this.tree.root, available);
-		this.bodyRows = this.paneBodyRows.get(this.tree.panes()[0]!) ?? Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, available - TITLE_ROWS);
+		this.bodyRows = this.paneBodyRows.get(this.tree.panes()[0]!) ?? Math.max(MIN_PANE_HEIGHT - BORDER_ROWS, available - BORDER_ROWS);
 		for (const [id, component] of this.deps.panes) {
 			const rows = this.getBodyRows(id);
 			const maybeView = component as Partial<View> & { setViewportHeight?: (rows: number) => void };
@@ -279,7 +305,7 @@ export class WindowManager implements Component {
 	/** Assign total pane rows through the tree; vertical siblings share height. */
 	private assignPaneRows(node: TreeNode, totalRows: number): void {
 		if (typeof node === "string") {
-			this.paneBodyRows.set(node, Math.max(MIN_PANE_HEIGHT - TITLE_ROWS, totalRows - TITLE_ROWS));
+			this.paneBodyRows.set(node, Math.max(MIN_PANE_HEIGHT - BORDER_ROWS, totalRows - BORDER_ROWS));
 			return;
 		}
 		if (node.dir === "v") {
