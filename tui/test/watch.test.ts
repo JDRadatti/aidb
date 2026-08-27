@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { WatchListView } from "../src/views/watch.ts";
+import { ViewFlags } from "../src/viz/types.ts";
 import type { FetchCtx } from "../src/viz/types.ts";
 
 const flush = async (): Promise<void> => {
@@ -131,5 +132,31 @@ describe("WatchListView", () => {
 		await flush();
 		assert.equal(reads, 1, "bytes renderer should reuse the cached observation");
 		assert.match(view.getEntries()[0]!.value!, /41 42 43/);
+	});
+
+	it("cycling the renderer and toggling flags never refetches", async () => {
+		let reads = 0;
+		const view = makeView({
+			evaluateDetailed: async () => ({ result: "buf", type: "char [8]", variablesReference: 0, memoryReference: "0x1000" }),
+			readMemory: async () => {
+				reads++;
+				return { address: "0x1000", data: new Uint8Array([0x41, 0x42, 0x43]) };
+			},
+		});
+		view.add("message");
+		await flush();
+		assert.equal(reads, 1);
+
+		// Cycles through renderers in place using the cached bytes.
+		view.cycleRendererAt(0); // lines -> text -> bytes...
+		const spec = view.getEntries()[0]!.renderSpec;
+		assert.notEqual(spec.rendererId, "lines");
+		assert.equal(reads, 1, "renderer cycling must not refetch");
+
+		// Toggling a flags is render-only.
+		const before = view.getEntries()[0]!.renderSpec.flags ?? 0;
+		view.toggleFlagAt(0, ViewFlags.ADDRESSES);
+		assert.notEqual(view.getEntries()[0]!.renderSpec.flags, before);
+		assert.equal(reads, 1, "flag toggling must not refetch");
 	});
 });

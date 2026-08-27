@@ -1,20 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-	INTERPRETERS,
-	makeBitmapInterpreter,
-	renderBitmap,
-	renderBytes,
-	renderChars,
-	renderCode,
-	renderHexdump,
-	renderInterleaved,
-	renderInterpreter,
-	renderSparkline,
-	renderTable,
-	renderTree,
-	renderTuple,
-} from "../src/viz/interpreters.ts";
+import { INTERPRETERS, renderBitmap, renderBytes, renderChars, renderCode, renderHexdump, renderInterleaved, renderInterpreter, renderSparkline, renderTable, renderTree, renderTuple, makeBitmapInterpreter } from "../src/viz/interpreters.ts";
+import { ViewFlags } from "../src/viz/types.ts";
 import type { BindingSnapshot, Rect, VarNode } from "../src/viz/types.ts";
 import { FRAME_RGB_BYTES, MESSAGE_BYTES } from "./fixtures/bytes.ts";
 
@@ -140,6 +127,23 @@ describe("byte renderers", () => {
 		assert.ok(INTERPRETERS.chars!.optionSchema?.encoding);
 		assert.ok(INTERPRETERS.tuple!.optionSchema?.elementWidth);
 		assert.ok(INTERPRETERS.bitmap!.optionSchema?.width);
+	});
+
+	it("flags gate the hexdump gutter, ascii column, and change highlighting", () => {
+		const snap = memorySnap([0x41, 0x42]);
+		const prev = memorySnap([0x41, 0x00]);
+
+		const full = renderHexdump(snap, prev, WIDE);
+		assert.ok(full[1]!.startsWith("0x4000"), "gutter shown by default");
+		assert.ok(stripAnsi(full[1]!).includes("|AB"), "ascii column shown by default");
+		assert.ok(full[1]!.includes("\x1b[33m"), "change marking on by default");
+
+		const noGutter = renderHexdump(snap, prev, WIDE, 0);
+		assert.ok(!noGutter[1]!.trimStart().startsWith("0x4000"), "gutter hidden with flags=0");
+		assert.ok(!stripAnsi(noGutter[1]!).includes("|"), "ascii column hidden with flags=0");
+
+		const noChanges = renderBytes(snap, prev, WIDE, {}, ViewFlags.HIDE_CHANGES);
+		assert.ok(!noChanges[1]!.includes("\x1b[33m"), "change marking disabled by HIDE_CHANGES");
 	});
 });
 

@@ -7,6 +7,7 @@ import { WindowManager } from "../src/window-manager.ts";
 import { LivePaneView } from "../src/views/live-pane.ts";
 import { WatchListView } from "../src/views/watch.ts";
 import { InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding } from "../src/viz/bindings.ts";
+import { ViewFlags } from "../src/viz/types.ts";
 import type { BindingSnapshot } from "../src/viz/types.ts";
 
 function makeContext(api: Record<string, unknown> = {}) {
@@ -96,6 +97,26 @@ describe("LivePaneView", () => {
 		});
 		await view.refreshAll();
 		assert.ok(view.render(60).some((line) => line.includes("✗ Cannot access memory")));
+	});
+
+	it("toggleFlag re-renders in place without refetching", async () => {
+		const { view, calls } = memoryView();
+		await view.refreshAll();
+		const before = calls();
+		const flagsBefore = view.getFlags();
+		view.toggleFlag(ViewFlags.HIDE_CHANGES);
+		assert.notEqual(view.getFlags(), flagsBefore, "flag should toggle");
+		assert.ok((view.getFlags()! & ViewFlags.HIDE_CHANGES) !== 0, "HIDE_CHANGES bit set");
+		assert.equal(calls(), before, "flag toggling must not refetch");
+	});
+
+	it("toggleFlag starts from renderer defaults so other bits survive", async () => {
+		const { view } = memoryView();
+		await view.refreshAll();
+		view.toggleFlag(ViewFlags.TYPES);
+		const flags = view.getFlags()!;
+		assert.ok((flags & ViewFlags.ADDRESSES) !== 0, "hexdump default gutter survives toggle");
+		assert.ok((flags & ViewFlags.ASCII) !== 0, "hexdump default ascii survives toggle");
 	});
 
 	it("setInterpreter swaps the renderer in place over the same snapshot", async () => {
@@ -290,6 +311,20 @@ describe("/win load and /win pick", () => {
 		const view = windows.component("live") as LivePaneView;
 		assert.equal(view.getInterpreterId(), "lines");
 		assert.match(lastMessage(messages), /renders with lines \(value lines\)/);
+	});
+
+	it("/win pick +flag toggles a render flag without refetching", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("/win vsplit live", ctx);
+		await handleReplInput("/win load live mem &buf 4", ctx);
+		await new Promise((r) => setTimeout(r, 0));
+		const view = windows.component("live") as LivePaneView;
+		const visible = view.getFlags();
+		messages.length = 0;
+
+		await handleReplInput("/win pick live +types", ctx);
+		assert.notEqual(view.getFlags(), visible, "flag should toggle");
+		assert.match(lastMessage(messages), /type/);
 	});
 
 	it("/win pick refuses panes without a live binding", async () => {
