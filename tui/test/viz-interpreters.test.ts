@@ -185,7 +185,7 @@ describe("renderCode", () => {
 			currentAddress: "0x401126 <main+0>",
 			instructions: [{ address: "0X401126", symbol: "main", instructionBytes: "55", instruction: "push %rbp", line: 12, current: false }],
 		}, undefined, WIDE);
-		assert.match(lines[0]!, /^▶      12 0[Xx]401126\s+<main>\s+push %rbp/);
+		assert.match(stripAnsi(lines[0]!), /^▶      12 0[Xx]401126\s+<main>\s+push %rbp/);
 	});
 
 	it("keeps the assembly source-line column aligned when debug info is missing", () => {
@@ -198,8 +198,8 @@ describe("renderCode", () => {
 			breakpoints: [{ line: 12, verified: true }],
 		}, undefined, WIDE);
 
-		assert.match(lines[0]!, /^▶ ●    12 0x401126/);
-		assert.match(lines[1]!, /^          0x401127/);
+		assert.match(stripAnsi(lines[0]!), /^▶ ●    12 0x401126/);
+		assert.match(stripAnsi(lines[1]!), /^          0x401127/);
 	});
 
 	it("renders the function symbol across instructions in the same function", () => {
@@ -211,9 +211,9 @@ describe("renderCode", () => {
 			],
 		}, undefined, WIDE);
 
-		assert.match(lines[0]!, /<main>\s+push %rbp/);
-		assert.match(lines[1]!, /<main>\s+mov %rbp,%rsp/);
-		assert.doesNotMatch(lines[0]!, /55/);
+		assert.match(stripAnsi(lines[0]!), /<main>\s+push %rbp/);
+		assert.match(stripAnsi(lines[1]!), /<main>\s+mov %rbp,%rsp/);
+		assert.doesNotMatch(stripAnsi(lines[0]!), /55/);
 	});
 
 	it("renders source lines with mapped instructions beneath them", () => {
@@ -228,11 +228,11 @@ describe("renderCode", () => {
 			],
 		}, undefined, WIDE);
 
-		assert.match(lines[0]!, /11 \|/);
-		assert.match(lines[0]!, /int.*x.*=.*1/);
-		assert.match(lines[1]!, /│ 0x401126\s+<main>\s+mov/);
-		assert.match(lines[2]!.replace(/\x1b\[[0-9;]*m/g, ""), /▶ ●\s+12 \| x\+\+;/);
-		assert.match(lines[3]!, /▶\s+│ 0x401127/);
+		assert.match(stripAnsi(lines[0]!), /11 \|/);
+		assert.match(stripAnsi(lines[0]!), /int.*x.*=.*1/);
+		assert.match(stripAnsi(lines[1]!), /│ 0x401126\s+<main>\s+mov/);
+		assert.match(stripAnsi(lines[2]!), /▶ ●\s+12 \| x\+\+;/);
+		assert.match(stripAnsi(lines[3]!), /▶\s+│ 0x401127/);
 	});
 
 	it("renders a notice above assembly when source is unavailable", () => {
@@ -242,8 +242,8 @@ describe("renderCode", () => {
 			interleaved: [{ kind: "instruction", instruction: { address: "0x401126", instruction: "push rbp", current: true } }],
 		}, undefined, WIDE);
 
-		assert.match(lines[0]!.replace(/\x1b\[[0-9;]*m/g, ""), /^i Source unavailable/);
-		assert.match(lines[1]!, /▶\s+│ 0x401126/);
+		assert.match(stripAnsi(lines[0]!), /^i Source unavailable/);
+		assert.match(stripAnsi(lines[1]!), /▶\s+│ 0x401126/);
 	});
 });
 

@@ -30,7 +30,22 @@ export interface ThemeConfig {
 	success: number;
 	warning: number;
 	error: number;
+	/** Border / scrollbar edge colour. */
 	border: number;
+	/** Focused pane outline (white). */
+	borderActive: number;
+	/** Non-focused pane outline (subtle gray). */
+	borderInactive: number;
+	/** 256-colour background fill shared by every pane. */
+	paneBg: number;
+	/* Semantic token roles; source and assembly use the same set. */
+	keyword: number;
+	string: number;
+	number: number;
+	comment: number;
+	mnemonic: number;
+	register: number;
+	directive: number;
 }
 
 export interface GdbConfig {
@@ -121,6 +136,16 @@ export const DEFAULT_CONFIG: Config = {
 		warning: 33,
 		error: 31,
 		border: 90,
+		borderActive: 255,
+		borderInactive: 234,
+		paneBg: 235,
+		keyword: 36,
+		string: 32,
+		number: 33,
+		comment: 90,
+		mnemonic: 93,
+		register: 94,
+		directive: 96,
 	},
 	gdb: { path: "gdb", args: [], env: {} },
 	keybindings: {
@@ -175,14 +200,14 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 		issues.push({ path: `theme.${key}`, message: `expected an ANSI colour code (0-256), got ${JSON.stringify(v)}` });
 		return fallback;
 	};
-	const theme: ThemeConfig = {
-		accent: pickColor("accent", DEFAULT_CONFIG.theme.accent),
-		muted: pickColor("muted", DEFAULT_CONFIG.theme.muted),
-		success: pickColor("success", DEFAULT_CONFIG.theme.success),
-		warning: pickColor("warning", DEFAULT_CONFIG.theme.warning),
-		error: pickColor("error", DEFAULT_CONFIG.theme.error),
-		border: pickColor("border", DEFAULT_CONFIG.theme.border),
-	};
+	const themeKeys = [
+		"accent", "muted", "success", "warning", "error", "border",
+		"borderActive", "borderInactive", "paneBg", "keyword", "string", "number", "comment", "mnemonic", "register", "directive",
+	] as const;
+	const theme = {} as ThemeConfig;
+	for (const key of themeKeys) {
+		theme[key] = pickColor(key, DEFAULT_CONFIG.theme[key]);
+	}
 
 	/* gdb */
 	const asString = (v: unknown, p: string, fallback: string): string => {

@@ -8,7 +8,17 @@
 		"success": 32,
 		"warning": 33,
 		"error": 31,
-		"border": 90
+		"border": 90,
+		"borderActive": 255,
+		"borderInactive": 234,
+		"paneBg": 235,
+		"keyword": 36,
+		"string": 32,
+		"number": 33,
+		"comment": 90,
+		"mnemonic": 93,
+		"register": 94,
+		"directive": 96
 	},
 	"gdb": {
 		"//f": "path + env are honoured by the DAP client; extra gdb argv is reserved (core hardcodes --interpreter=dap --nx --quiet).",

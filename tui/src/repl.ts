@@ -1073,7 +1073,9 @@ async function handleConfig(args: string, ctx: ReplContext): Promise<void> {
 	const { theme, gdb, sessions } = ctx.config;
 	const origin = (k: string) => ctx.configSources.sectionOrigin[k as keyof Config];
 	io.line("aidb config");
-	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border}`);
+	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border} borderActive=${theme.borderActive} borderInactive=${theme.borderInactive}`);
+	io.info(`  tokens     (theme): keyword=${theme.keyword} string=${theme.string} number=${theme.number} comment=${theme.comment}`);
+	io.info(`  asm        (theme): mnemonic=${theme.mnemonic} register=${theme.register} directive=${theme.directive}`);
 	io.info(`  gdb        (${origin("gdb")}): path=${gdb.path}`);
 	io.info(`  sessions   (${origin("sessions")}): history=${sessions.historyPath}`);
 	if (ctx.configSources.issues.length > 0) {

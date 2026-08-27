@@ -45,11 +45,41 @@ function highlightCode(line: string): string {
 		const value = match[0];
 		const index = match.index ?? 0;
 		result += line.slice(offset, index);
-		if (value.startsWith("//") || value.startsWith("/*")) result += colors.muted(value);
-		else if (value.startsWith('"') || value.startsWith("'")) result += colors.success(value);
-		else if (/^\d/.test(value)) result += colors.warning(value);
-		else if (KEYWORDS.has(value)) result += colors.accent(value);
+		if (value.startsWith("//") || value.startsWith("/*")) result += colors.comment(value);
+		else if (value.startsWith('"') || value.startsWith("'")) result += colors.string(value);
+		else if (/^\d/.test(value)) result += colors.number(value);
+		else if (KEYWORDS.has(value)) result += colors.keyword(value);
 		else result += value;
+		offset = index + value.length;
+	}
+	return result + line.slice(offset);
+}
+
+/**
+ * Colour the mnemonic (/AT&T) operands of a single disassembled instruction:
+ * the first identifier is the mnemonic, then %-registers, $-immediates,
+ * constant addresses, directives and #-comments each get a token role.
+ */
+function highlightAsm(line: string): string {
+	const token = /(#[^\n]*|\$[^ \t,]|%\w+|\b\d+(?:[xX][0-9a-fA-F]+)?\b|\.\w+|\b[A-Za-z_.][\w.-]*\b)/g;
+	let result = "";
+	let offset = 0;
+	let firstIdentifier = false;
+	for (const match of line.matchAll(token)) {
+		const value = match[0];
+		const index = match.index ?? 0;
+		result += line.slice(offset, index);
+		let wrap: (s: string) => string;
+		if (value.startsWith("#")) wrap = colors.comment;
+		else if (value.startsWith("$")) wrap = colors.number;
+		else if (value.startsWith("%")) wrap = colors.register;
+		else if (/^\d/.test(value)) wrap = colors.number;
+		else if (value.startsWith(".") && /^\.[A-Za-z]/.test(value)) wrap = colors.directive;
+		else {
+			wrap = firstIdentifier ? colors.mnemonic : (s: string) => colors.bold(colors.accent(s));
+			firstIdentifier = true;
+		}
+		result += wrap(value);
 		offset = index + value.length;
 	}
 	return result + line.slice(offset);
@@ -90,7 +120,7 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
 			const sourceLine = instruction.line === undefined ? "     " : String(instruction.line).padStart(5);
 			const symbol = currentSymbol ? `<${currentSymbol}>` : "";
-			return `${marker} ${breakpointMarker} ${sourceLine} ${instruction.address.padEnd(18)}${symbol.padEnd(20)} ${instruction.instruction}`;
+			return `${marker} ${breakpointMarker} ${sourceLine} ${colors.muted(instruction.address.padEnd(18))}${colors.bold(colors.accent(symbol)).padEnd(20)} ${highlightAsm(instruction.instruction)}`;
 		});
 		return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 	}
@@ -125,7 +155,7 @@ export function renderInterleaved(snap: BindingSnapshot): string[] {
 		const instruction = row.instruction;
 		const symbol = instruction.symbol ? `<${instruction.symbol}>` : "";
 		const marker = instruction.current ? "▶" : " ";
-		return `${marker}       │ ${instruction.address.padEnd(18)}${symbol.padEnd(20)} ${instruction.instruction}`;
+		return `${marker}       │ ${colors.muted(instruction.address.padEnd(16))}${colors.bold(colors.accent(symbol)).padEnd(20)} ${highlightAsm(instruction.instruction)}`;
 	});
 	return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 }
