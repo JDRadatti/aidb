@@ -9,18 +9,30 @@
  * inner resets, so these escapes are safe inside panes.
  */
 
-import type { BindingSnapshot, InterleavedRow, Interpreter, Rect, VarNode } from "./types.ts";
+import type { BindingSnapshot, InterleavedRow, Interpreter, ObservationCapability, Rect, VarNode } from "./types.ts";
+import {
+	makeBitmapInterpreter,
+	makeBytesInterpreter,
+	makeCharsInterpreter,
+	makeHexdumpInterpreter,
+	makeTupleInterpreter,
+	mark,
+} from "./byte-renderers.ts";
 import { colors } from "../theme.ts";
 
-const CHANGED = "\x1b[33m";
-const RESET = "\x1b[0m";
+export {
+	makeBitmapInterpreter,
+	makeBytesInterpreter,
+	makeCharsInterpreter,
+	makeHexdumpInterpreter,
+	makeTupleInterpreter,
+	renderHexdump,
+} from "./byte-renderers.ts";
+export { renderBytes, renderChars, renderTuple, renderBitmap } from "./byte-renderers.ts";
+
 const KEYWORDS = new Set([
 	"alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue", "default", "delete", "do", "double", "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "namespace", "new", "noexcept", "not", "nullptr", "operator", "or", "private", "protected", "public", "register", "reinterpret_cast", "return", "short", "signed", "sizeof", "static", "static_cast", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
 ]);
-
-function mark(changed: boolean, text: string): string {
-	return changed ? CHANGED + text + RESET : text;
-}
 
 function highlightCode(line: string): string {
 	if (/^\s*#/.test(line)) return colors.bold(colors.accent(line));
@@ -128,52 +140,6 @@ function sameAddress(left: string, right: string | undefined): boolean {
 	}
 }
 
-/**
- * Classic hex+ascii dump. Column count adapts to pane width (16 → 8 → 4);
- * bytes that differ from the previous stop are marked in hex and ascii.
- */
-export function renderHexdump(snap: BindingSnapshot, prev: BindingSnapshot | undefined, rect: Rect): string[] {
-	if (snap.error) return errorLines(snap);
-	const bytes = snap.bytes ?? new Uint8Array(0);
-	const base = snap.address ?? "?";
-	const addrWidth = Math.max(base.length, 10);
-
-	let cols = 16;
-	while (cols > 4 && addrWidth + cols * 3 + 6 > rect.width) cols /= 2;
-
-	const prevBytes = prev?.error === undefined ? prev?.bytes : undefined;
-	let changedCount = 0;
-	const rows: string[] = [];
-
-	for (let offset = 0; offset < bytes.length; offset += cols) {
-		let hex = "";
-		let ascii = "";
-		for (let i = 0; i < cols; i++) {
-			const index = offset + i;
-			if (index >= bytes.length) {
-				hex += "   ";
-				continue;
-			}
-			const byte = bytes[index]!;
-			const changed = prevBytes !== undefined && index < prevBytes.length && prevBytes[index] !== byte;
-			if (changed) changedCount++;
-			if (i === cols / 2 && i > 0) hex += "  ";
-			hex += mark(changed, byte.toString(16).padStart(2, "0")) + " ";
-			ascii += mark(changed, byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".");
-		}
-		rows.push(`${rowLabel(base, offset).padEnd(addrWidth)}  ${hex.padEnd(cols * 3 + 2).slice(0, cols * 3 + 2)}|${ascii}|`);
-	}
-	rows.unshift(`${base} · ${bytes.length}B` + (changedCount > 0 ? ` · ${changedCount} changed` : ""));
-	return rows;
-}
-
-function rowLabel(base: string, offset: number): string {
-	const numeric = /^0x[0-9a-fA-F]+$/.exec(base);
-	if (!numeric) return offset === 0 ? base : `+${offset}`;
-	const value = BigInt(base) + BigInt(offset);
-	return "0x" + value.toString(16);
-}
-
 const BLOCKS = "▁▂▃▄▅▆▇█";
 
 /** One-stop-per-sample bar sparkline with a min/max/last footer. */
@@ -274,14 +240,56 @@ function guarded(render: (snap: BindingSnapshot, prev: BindingSnapshot | undefin
 	};
 }
 
+function hasCapability(snap: BindingSnapshot, capability: ObservationCapability): boolean {
+	switch (capability) {
+		case "value": return snap.value !== undefined;
+		case "memory": return snap.bytes !== undefined;
+		case "tree": return snap.tree !== undefined;
+		case "rows": return snap.rows !== undefined;
+		case "lines": return snap.lines !== undefined;
+		case "assembly": return snap.instructions !== undefined;
+		case "interleaved": return snap.interleaved !== undefined;
+		case "samples": return snap.samples !== undefined;
+	}
+}
+
+/** Return a stable explanation when a renderer cannot consume an observation. */
+export function missingRequirements(interpreter: Interpreter, snap: BindingSnapshot | undefined): string | undefined {
+	if (!snap) return undefined;
+	const missing = (interpreter.requires ?? []).filter((capability) => !hasCapability(snap, capability));
+	if (missing.length > 0) return `renderer '${interpreter.id}' requires: ${missing.join(", ")}`;
+	if (interpreter.requiresAny && !interpreter.requiresAny.some((capability) => hasCapability(snap, capability))) {
+		return `renderer '${interpreter.id}' requires one of: ${interpreter.requiresAny.join(", ")}`;
+	}
+	return undefined;
+}
+
+/** Render through the registry's capability contract. */
+export function renderInterpreter(
+	interpreter: Interpreter,
+	snap: BindingSnapshot | undefined,
+	prev: BindingSnapshot | undefined,
+	rect: Rect,
+): string[] {
+	// Preserve the binding's actual failure; requirements describe data
+	// compatibility and should not hide the useful error message.
+	if (snap?.error) return interpreter.render(snap, prev, rect);
+	const requirementError = missingRequirements(interpreter, snap);
+	return requirementError ? [`✗ ${requirementError}`] : interpreter.render(snap, prev, rect);
+}
+
 /** Registry powering the `/win pick` menu and pane mounting. */
 export const INTERPRETERS: Record<string, Interpreter> = {
-	lines: { id: "lines", title: "value lines", render: guarded((snap) => renderValueLines(snap)) },
+	lines: { id: "lines", title: "value lines", requires: ["value"], render: guarded((snap) => renderValueLines(snap)) },
 	text: { id: "text", title: "text", render: guarded((snap) => renderText(snap)) },
-	code: { id: "code", title: "code", render: guarded(renderCode) },
-	iasm: { id: "iasm", title: "interleaved assembly", render: guarded((snap) => renderInterleaved(snap)) },
-	"struct-tree": { id: "struct-tree", title: "struct tree", render: guarded(renderTree) },
-	sparkline: { id: "sparkline", title: "sparkline", render: guarded(renderSparkline) },
-	hexdump: { id: "hexdump", title: "hexdump", render: guarded(renderHexdump) },
-	table: { id: "table", title: "table", render: guarded(renderTable) },
+	code: { id: "code", title: "code", requiresAny: ["lines", "assembly"], render: guarded(renderCode) },
+	iasm: { id: "iasm", title: "interleaved assembly", requiresAny: ["interleaved", "assembly"], render: guarded((snap) => renderInterleaved(snap)) },
+	"struct-tree": { id: "struct-tree", title: "struct tree", requires: ["tree"], render: guarded(renderTree) },
+	sparkline: { id: "sparkline", title: "sparkline", requires: ["samples"], render: guarded(renderSparkline) },
+	hexdump: makeHexdumpInterpreter(),
+	bytes: makeBytesInterpreter(),
+	chars: makeCharsInterpreter(),
+	tuple: makeTupleInterpreter({ elementWidth: 1, signed: false, format: "dec", tupleWidth: 3 }),
+	bitmap: makeBitmapInterpreter(),
+	table: { id: "table", title: "table", requires: ["rows"], render: guarded(renderTable) },
 };

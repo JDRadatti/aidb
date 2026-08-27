@@ -1,13 +1,33 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { INTERPRETERS, renderCode, renderHexdump, renderInterleaved, renderSparkline, renderTable, renderTree } from "../src/viz/interpreters.ts";
+import {
+	INTERPRETERS,
+	makeBitmapInterpreter,
+	renderBitmap,
+	renderBytes,
+	renderChars,
+	renderCode,
+	renderHexdump,
+	renderInterleaved,
+	renderInterpreter,
+	renderSparkline,
+	renderTable,
+	renderTree,
+	renderTuple,
+} from "../src/viz/interpreters.ts";
 import type { BindingSnapshot, Rect, VarNode } from "../src/viz/types.ts";
+import { FRAME_RGB_BYTES, MESSAGE_BYTES } from "./fixtures/bytes.ts";
 
 const WIDE: Rect = { width: 100, height: 24 };
 const NARROW: Rect = { width: 30, height: 10 };
 
-function memorySnap(bytes: number[], address = "0x4000"): BindingSnapshot {
-	return { kind: "memory", address, bytes: new Uint8Array(bytes) };
+function memorySnap(bytes: number[] | Uint8Array, address = "0x4000"): BindingSnapshot {
+	const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+	return { kind: "memory", address, bytes: data };
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 describe("renderHexdump", () => {
@@ -45,7 +65,85 @@ describe("renderHexdump", () => {
 	});
 });
 
-	describe("renderCode", () => {
+describe("byte renderers", () => {
+	const frameSnap = memorySnap(FRAME_RGB_BYTES);
+	const messageSnap = memorySnap(new Uint8Array([...MESSAGE_BYTES, 0, 0x40, 0x60]));
+
+	it("renders the shared RGB fixture through bytes, chars, tuple, and bitmap", () => {
+		const bytes = renderBytes(frameSnap, undefined, WIDE);
+		assert.match(bytes[0]!, /12B/);
+		assert.match(bytes[1]!, /ff 00 00 00 ff 00 00 00 ff ff ff ff/);
+
+		const chars = stripAnsi(renderChars(messageSnap, undefined, WIDE).join("\n"));
+		assert.ok(chars.includes("aidb views"));
+		assert.match(chars, /10B of 13B/);
+
+		const rawChars = stripAnsi(renderChars(messageSnap, undefined, WIDE, { stopAtNull: false }).join("\n"));
+		assert.ok(rawChars.includes("."));
+
+		const tuple = stripAnsi(renderTuple(frameSnap, undefined, WIDE, { elementWidth: 1, tupleWidth: 3 }).join("\n"));
+		assert.match(tuple, /\(255, 0, 0\)/);
+		assert.match(tuple, /\(0, 255, 0\)/);
+		assert.match(tuple, /\(255, 255, 255\)/);
+
+		const bitmap = renderBitmap(frameSnap, undefined, { width: 100, height: 8 }, {
+			width: 2,
+			height: 2,
+			tupleWidth: 3,
+			channelOrder: "rgb",
+			scale: "1:1",
+		});
+		assert.match(bitmap.at(-1)!, /2×2 · rgb · 1:1/);
+		assert.equal(bitmap.length, 3);
+	});
+
+	it("marks changed bytes across byte-oriented renderers", () => {
+		const prev = memorySnap(FRAME_RGB_BYTES);
+		const changed = memorySnap(new Uint8Array([255, 128, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]));
+
+		assert.ok(renderBytes(changed, prev, WIDE)[0]!.includes("1 changed"));
+		assert.ok(renderHexdump(changed, prev, WIDE)[0]!.includes("1 changed"));
+		assert.ok(stripAnsi(renderTuple(changed, prev, WIDE, { elementWidth: 1, tupleWidth: 3 }).join("\n")).includes("128"));
+	});
+
+	it("wraps bytes and chars on narrow panes", () => {
+		const bytes = renderBytes(memorySnap(Array.from({ length: 32 }, (_, i) => i)), undefined, NARROW);
+		assert.ok(bytes.length > 2);
+
+		const chars = renderChars(messageSnap, undefined, { width: 6, height: 8 });
+		assert.ok(chars.length > 2);
+	});
+
+	it("reports incomplete tuples and missing bitmap options", () => {
+		const odd = memorySnap([1, 2, 3, 4, 5]);
+		assert.match(renderTuple(odd, undefined, WIDE, { elementWidth: 1, tupleWidth: 3 })[0]!, /incomplete trailing tuple/);
+
+		assert.deepEqual(renderInterpreter(INTERPRETERS.bitmap!, frameSnap, undefined, WIDE), [
+			"✗ renderer 'bitmap' requires options: width, height, tupleWidth (Phase 6 will wire these through /win pick)",
+		]);
+	});
+
+	it("uses a configured bitmap interpreter factory", () => {
+		const interpreter = makeBitmapInterpreter({
+			width: 2,
+			height: 2,
+			tupleWidth: 3,
+			channelOrder: "rgb",
+			scale: "fit",
+		});
+		const lines = renderInterpreter(interpreter, frameSnap, undefined, WIDE);
+		assert.match(lines.at(-1)!, /2×2 · rgb · fit/);
+	});
+
+	it("exposes option schemas on byte renderers", () => {
+		assert.ok(INTERPRETERS.bytes!.optionSchema?.columns);
+		assert.ok(INTERPRETERS.chars!.optionSchema?.encoding);
+		assert.ok(INTERPRETERS.tuple!.optionSchema?.elementWidth);
+		assert.ok(INTERPRETERS.bitmap!.optionSchema?.width);
+	});
+});
+
+describe("renderCode", () => {
 	it("renders source lines with a current-line marker", () => {
 		const lines = renderCode({ kind: "source", file: "example.c", startLine: 9, currentLine: 10, lines: ["int main()", "return 0;"] }, undefined, WIDE);
 		assert.match(lines[0]!, /^        9 \| \x1b\[36mint\x1b\[0m main\(\)$/);
@@ -224,6 +322,16 @@ describe("interpreter registry", () => {
 	});
 
 	it("exposes the built-in set for the /win pick menu", () => {
-		assert.deepEqual(Object.keys(INTERPRETERS).sort(), ["code", "hexdump", "iasm", "lines", "sparkline", "struct-tree", "table", "text"]);
+		assert.deepEqual(Object.keys(INTERPRETERS).sort(), [
+			"bitmap", "bytes", "chars", "code", "hexdump", "iasm", "lines", "sparkline", "struct-tree", "table", "text", "tuple",
+		]);
+	});
+
+	it("declares requirements and explains incompatible observations", () => {
+		assert.deepEqual(INTERPRETERS.hexdump!.requires, ["memory"]);
+		assert.deepEqual(INTERPRETERS["struct-tree"]!.requires, ["tree"]);
+		assert.deepEqual(renderInterpreter(INTERPRETERS.hexdump!, { kind: "expression", value: "frame", type: "Pixel [4]" }, undefined, WIDE), [
+			"✗ renderer 'hexdump' requires: memory",
+		]);
 	});
 });

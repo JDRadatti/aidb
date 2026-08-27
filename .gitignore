@@ -8,6 +8,7 @@ debugger-core/dist/
 # Compiled test program (gcc -g test/test.c)
 test/test
 /example
+test/fixtures/view-data
 *.o
 
 # Planning notes / generated docs
