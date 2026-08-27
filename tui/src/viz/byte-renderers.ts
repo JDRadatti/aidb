@@ -3,6 +3,7 @@
  * terminal bitmaps. Pure functions over BindingSnapshot memory fields.
  */
 
+import { ViewFlags } from "./types.ts";
 import type {
 	BitmapOptions,
 	BindingSnapshot,
@@ -21,15 +22,26 @@ export function mark(changed: boolean, text: string): string {
 	return changed ? CHANGED + text + RESET : text;
 }
 
+/** `mark`, disabled when the render spec asks to hide changes. */
+export function markWith(flags: ViewFlags | undefined, changed: boolean, text: string): string {
+	return (flags ?? 0) & ViewFlags.HIDE_CHANGES ? text : mark(changed, text);
+}
+
+/** Whether a flags value has a given bit set. */
+export function hasFlag(flags: ViewFlags | undefined, bit: ViewFlags): boolean {
+	return ((flags ?? 0) & bit) !== 0;
+}
+
 function errorLines(snap: BindingSnapshot): string[] {
 	return [`✗ ${snap.error}`];
 }
 
-function memoryHeader(snap: BindingSnapshot, changedCount: number, shownBytes?: number): string {
+function memoryHeader(snap: BindingSnapshot, changedCount: number, shownBytes?: number, flags?: ViewFlags, typeLabel?: string): string {
 	const base = snap.address ?? "?";
 	const total = snap.bytes!.length;
 	const sizeLabel = shownBytes !== undefined && shownBytes < total ? `${shownBytes}B of ${total}B` : `${total}B`;
-	return `${base} · ${sizeLabel}` + (changedCount > 0 ? ` · ${changedCount} changed` : "");
+	const type = flags !== undefined && (flags & ViewFlags.TYPES) !== 0 ? ` : ${typeLabel ?? snap.type ?? ""}` : "";
+	return `${base}${type} · ${sizeLabel}` + (changedCount > 0 ? ` · ${changedCount} changed` : "");
 }
 
 /** Shrink column count until rows fit the pane width. */
@@ -138,9 +150,9 @@ function channelsFromTuple(
 	return [map.r, map.g, map.b];
 }
 
-function trueColorCell(r: number, g: number, b: number, changed: boolean): string {
+function trueColorCell(r: number, g: number, b: number, changed: boolean, flags?: ViewFlags): string {
 	const cell = ` \x1b[38;2;${r};${g};${b}m${RESET}`;
-	return changed ? CHANGED + "▲" + RESET + cell : cell;
+	return hasFlag(flags, ViewFlags.HIDE_CHANGES) ? cell : changed ? CHANGED + "▲" + RESET + cell : cell;
 }
 
 function missingBitmapOptions(options: BitmapOptions): string | undefined {
@@ -155,11 +167,20 @@ function missingBitmapOptions(options: BitmapOptions): string | undefined {
 /**
  * Classic hex+ascii dump. Column count adapts to pane width (16 → 8 → 4);
  * bytes that differ from the previous stop are marked in hex and ascii.
+ * Flags gate the address gutter (ADDRESSES), the ASCII column (ASCII),
+ * the type in the header (TYPES), and change marking (HIDE_CHANGES).
  */
-export function renderHexdump(snap: BindingSnapshot, prev: BindingSnapshot | undefined, rect: Rect): string[] {
+export function renderHexdump(
+	snap: BindingSnapshot,
+	prev: BindingSnapshot | undefined,
+	rect: Rect,
+	flags: ViewFlags = ViewFlags.ADDRESSES | ViewFlags.ASCII,
+): string[] {
 	if (snap.error) return errorLines(snap);
 	const bytes = snap.bytes ?? new Uint8Array(0);
 	const base = snap.address ?? "?";
+	const showGutter = hasFlag(flags, ViewFlags.ADDRESSES);
+	const showAscii = hasFlag(flags, ViewFlags.ASCII);
 	const addrWidth = Math.max(base.length, 10);
 
 	let cols = 16;
@@ -181,12 +202,14 @@ export function renderHexdump(snap: BindingSnapshot, prev: BindingSnapshot | und
 			const changed = byteChanged(index, bytes, previous);
 			if (changed) changedCount++;
 			if (i === cols / 2 && i > 0) hex += "  ";
-			hex += mark(changed, byte.toString(16).padStart(2, "0")) + " ";
-			ascii += mark(changed, byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".");
+			hex += markWith(flags, changed, byte.toString(16).padStart(2, "0")) + " ";
+			ascii += markWith(flags, changed, byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".");
 		}
-		rows.push(`${rowLabel(base, offset).padEnd(addrWidth)}  ${hex.padEnd(cols * 3 + 2).slice(0, cols * 3 + 2)}|${ascii}|`);
+		const gutter = showGutter ? `${rowLabel(base, offset).padEnd(addrWidth)}  ` : "";
+		const body = `${hex.padEnd(cols * 3 + 2).slice(0, cols * 3 + 2)}${showAscii ? `|${ascii}|` : ""}`;
+		rows.push(`${gutter}${body}`);
 	}
-	rows.unshift(memoryHeader(snap, changedCount));
+	rows.unshift(memoryHeader(snap, changedCount, undefined, flags));
 	return rows;
 }
 
@@ -196,6 +219,7 @@ export function renderBytes(
 	prev: BindingSnapshot | undefined,
 	rect: Rect,
 	options: BytesOptions = {},
+	flags?: ViewFlags,
 ): string[] {
 	if (snap.error) return errorLines(snap);
 	const bytes = snap.bytes ?? new Uint8Array(0);
@@ -212,11 +236,11 @@ export function renderBytes(
 			const byte = bytes[index]!;
 			const changed = byteChanged(index, bytes, previous);
 			if (changed) changedCount++;
-			cells.push(mark(changed, byte.toString(16).padStart(2, "0")));
+			cells.push(markWith(flags, changed, byte.toString(16).padStart(2, "0")));
 		}
 		rows.push(cells.join(" "));
 	}
-	rows.unshift(memoryHeader(snap, changedCount));
+	rows.unshift(memoryHeader(snap, changedCount, undefined, flags));
 	return rows;
 }
 
@@ -226,6 +250,7 @@ export function renderChars(
 	prev: BindingSnapshot | undefined,
 	rect: Rect,
 	options: CharsOptions = {},
+	flags?: ViewFlags,
 ): string[] {
 	if (snap.error) return errorLines(snap);
 	const bytes = snap.bytes ?? new Uint8Array(0);
@@ -247,7 +272,7 @@ export function renderChars(
 		const changed = byteChanged(index, bytes, previous);
 		if (changed) changedCount++;
 		const glyph = formatChar(byte, { nonPrintable });
-		const rendered = encoding === "latin1" ? mark(changed, glyph) : mark(changed, decodeChars(new Uint8Array([byte]), encoding)[0] ?? glyph);
+		const rendered = encoding === "latin1" ? markWith(flags, changed, glyph) : markWith(flags, changed, decodeChars(new Uint8Array([byte]), encoding)[0] ?? glyph);
 		if (line.length + glyph.length > rect.width && line.length > 0) {
 			rows.push(line);
 			line = rendered;
@@ -256,7 +281,7 @@ export function renderChars(
 		}
 	}
 	if (line.length > 0) rows.push(line);
-	rows.unshift(memoryHeader(snap, changedCount, end));
+	rows.unshift(memoryHeader(snap, changedCount, end, flags));
 	return rows;
 }
 
@@ -266,6 +291,7 @@ export function renderTuple(
 	prev: BindingSnapshot | undefined,
 	rect: Rect,
 	options: TupleOptions,
+	flags?: ViewFlags,
 ): string[] {
 	if (snap.error) return errorLines(snap);
 	const bytes = snap.bytes ?? new Uint8Array(0);
@@ -293,7 +319,7 @@ export function renderTuple(
 			if (rangeChanged(index, elementWidth, bytes, previous)) tupleChanged = true;
 			elements.push(formatElement(value, format));
 		}
-		const rendered = mark(tupleChanged, `(${elements.join(", ")})`);
+		const rendered = markWith(flags, tupleChanged, `(${elements.join(", ")})`);
 		const separator = line.length === 0 ? "" : "  ";
 		if (line.length + separator.length + rendered.length > rect.width && line.length > 0) {
 			rows.push(line);
@@ -304,7 +330,7 @@ export function renderTuple(
 	}
 
 	if (line.length > 0) rows.push(line);
-	const header = memoryHeader(snap, countChanged(bytes, previous));
+	const header = memoryHeader(snap, countChanged(bytes, previous), undefined, flags);
 	if (partial) rows.unshift(`${header} · incomplete trailing tuple`);
 	else rows.unshift(header);
 	return rows;
@@ -316,6 +342,7 @@ export function renderBitmap(
 	prev: BindingSnapshot | undefined,
 	rect: Rect,
 	options: BitmapOptions,
+	flags?: ViewFlags,
 ): string[] {
 	if (snap.error) return errorLines(snap);
 	const optionError = missingBitmapOptions(options);
@@ -330,6 +357,7 @@ export function renderBitmap(
 	const scale = options.scale ?? "fit";
 	const needed = width * height * tupleWidth;
 	const bodyHeight = Math.max(1, rect.height - 1);
+	const showChanges = !hasFlag(flags, ViewFlags.HIDE_CHANGES);
 
 	let drawWidth = width;
 	let drawHeight = height;
@@ -359,9 +387,9 @@ export function renderBitmap(
 				line += " ";
 				continue;
 			}
-			const changed = rangeChanged(index, tupleWidth, bytes, previous);
+			const changed = showChanges && rangeChanged(index, tupleWidth, bytes, previous);
 			if (changed) changedPixels++;
-			line += trueColorCell(rgb[0], rgb[1], rgb[2], changed);
+			line += trueColorCell(rgb[0], rgb[1], rgb[2], changed, flags);
 		}
 		rows.push(line);
 	}
@@ -373,10 +401,10 @@ export function renderBitmap(
 	return rows;
 }
 
-function guarded(render: (snap: BindingSnapshot, prev: BindingSnapshot | undefined, rect: Rect) => string[]) {
-	return (snap: BindingSnapshot | undefined, prev: BindingSnapshot | undefined, rect: Rect): string[] => {
+function guarded(render: (snap: BindingSnapshot, prev: BindingSnapshot | undefined, rect: Rect, flags?: ViewFlags) => string[]) {
+	return (snap: BindingSnapshot | undefined, prev: BindingSnapshot | undefined, rect: Rect, flags?: ViewFlags): string[] => {
 		if (!snap) return ["waiting for data…"];
-		return render(snap, prev, rect);
+		return render(snap, prev, rect, flags);
 	};
 }
 
@@ -410,6 +438,10 @@ export function makeHexdumpInterpreter(): Interpreter {
 		id: "hexdump",
 		title: "hexdump",
 		requires: ["memory"],
+		// Preserve the classic full hex+ascii output when no flags are given.
+		defaultFlags: ViewFlags.ADDRESSES | ViewFlags.ASCII,
+		// Example spec options for tooling / AI; nothing consumes these at runtime.
+		examples: [{}, { columns: 8 }],
 		render: guarded(renderHexdump),
 	};
 }
@@ -421,7 +453,7 @@ export function makeBytesInterpreter(options: BytesOptions = {}): Interpreter {
 		requires: ["memory"],
 		options,
 		optionSchema: BYTES_OPTION_SCHEMA,
-		render: guarded((snap, prev, rect) => renderBytes(snap, prev, rect, options)),
+		render: guarded((snap, prev, rect, flags) => renderBytes(snap, prev, rect, options, flags)),
 	};
 }
 
@@ -432,7 +464,7 @@ export function makeCharsInterpreter(options: CharsOptions = {}): Interpreter {
 		requires: ["memory"],
 		options,
 		optionSchema: CHARS_OPTION_SCHEMA,
-		render: guarded((snap, prev, rect) => renderChars(snap, prev, rect, options)),
+		render: guarded((snap, prev, rect, flags) => renderChars(snap, prev, rect, options, flags)),
 	};
 }
 
@@ -443,7 +475,7 @@ export function makeTupleInterpreter(options: TupleOptions): Interpreter {
 		requires: ["memory"],
 		options,
 		optionSchema: TUPLE_OPTION_SCHEMA,
-		render: guarded((snap, prev, rect) => renderTuple(snap, prev, rect, options)),
+		render: guarded((snap, prev, rect, flags) => renderTuple(snap, prev, rect, options, flags)),
 	};
 }
 
@@ -454,6 +486,6 @@ export function makeBitmapInterpreter(options: BitmapOptions = {}): Interpreter 
 		requires: ["memory"],
 		options,
 		optionSchema: BITMAP_OPTION_SCHEMA,
-		render: guarded((snap, prev, rect) => renderBitmap(snap, prev, rect, options)),
+		render: guarded((snap, prev, rect, flags) => renderBitmap(snap, prev, rect, options, flags)),
 	};
 }

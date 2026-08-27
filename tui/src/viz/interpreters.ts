@@ -10,6 +10,8 @@
  */
 
 import type { BindingSnapshot, InterleavedRow, Interpreter, ObservationCapability, Rect, VarNode } from "./types.ts";
+import { ViewFlags } from "./types.ts";
+import type { RenderSpec } from "./render-spec.ts";
 import {
 	makeBitmapInterpreter,
 	makeBytesInterpreter,
@@ -264,18 +266,25 @@ export function missingRequirements(interpreter: Interpreter, snap: BindingSnaps
 	return undefined;
 }
 
-/** Render through the registry's capability contract. */
+/** Render through the registry's capability contract. Explicit flags override `defaultFlags`. */
 export function renderInterpreter(
 	interpreter: Interpreter,
 	snap: BindingSnapshot | undefined,
 	prev: BindingSnapshot | undefined,
 	rect: Rect,
+	flags?: ViewFlags,
 ): string[] {
 	// Preserve the binding's actual failure; requirements describe data
 	// compatibility and should not hide the useful error message.
-	if (snap?.error) return interpreter.render(snap, prev, rect);
+	if (snap?.error) return interpreter.render(snap, prev, rect, effectiveFlags(interpreter, flags));
 	const requirementError = missingRequirements(interpreter, snap);
-	return requirementError ? [`✗ ${requirementError}`] : interpreter.render(snap, prev, rect);
+	if (requirementError) return [`✗ ${requirementError}`];
+	return interpreter.render(snap, prev, rect, effectiveFlags(interpreter, flags));
+}
+
+/** Explicit flags win; otherwise use the interpreter's declared defaults (empty when none). */
+function effectiveFlags(interpreter: Interpreter, flags?: ViewFlags): ViewFlags {
+	return flags ?? (interpreter.defaultFlags ?? ViewFlags.None);
 }
 
 /** Registry powering the `/win pick` menu and pane mounting. */
@@ -293,3 +302,8 @@ export const INTERPRETERS: Record<string, Interpreter> = {
 	bitmap: makeBitmapInterpreter(),
 	table: { id: "table", title: "table", requires: ["rows"], render: guarded(renderTable) },
 };
+
+/** Filter a RenderSpec through an interpreter: flags default to the interpreter's defaults. */
+export function specFlags(interpreter: Interpreter, spec: RenderSpec): ViewFlags {
+	return spec.flags ?? (interpreter.defaultFlags ?? ViewFlags.None);
+}

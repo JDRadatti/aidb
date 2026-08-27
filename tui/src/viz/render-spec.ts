@@ -1,12 +1,24 @@
 /**
- * Minimal render specification shared by watch entries and live panes.
- * Phase 6 will add bitflags; today this is renderer id + typed options.
+ * A render specification shared by watch entries and live panes: a renderer
+ * id, orthogonal bitflags, and typed options. Flags and options are
+ * presentation-time only — `requiredBytes()` never reads them, so toggling
+ * a flag or tweaking options never triggers a debugger refetch.
  */
 
+import { ViewFlags } from "./types.ts";
 import type { BitmapOptions, BytesOptions, CharsOptions, TupleOptions } from "./types.ts";
+export { VIEW_FLAG_META, ViewFlags } from "./types.ts";
+export type { FlagDescriptor } from "./types.ts";
+
+/** Renderer ids in display/cycle order; a pane's flag surface is renderer-independent. */
+export const RENDERER_ORDER: readonly string[] = [
+	"lines", "text", "bytes", "chars", "tuple", "bitmap", "hexdump",
+	"code", "iasm", "struct-tree", "sparkline", "table",
+];
 
 export interface RenderSpec {
 	rendererId: string;
+	flags?: ViewFlags;
 	options?: BytesOptions | CharsOptions | TupleOptions | BitmapOptions;
 }
 
@@ -34,4 +46,25 @@ export function canReuseObservation(
 	next: RenderSpec,
 ): boolean {
 	return requiredBytes(next) <= Math.max(byteCount, snapBytes ?? 0);
+}
+
+/** Next renderer (or previous when `back`) in display order; never repeats the current. */
+export function cycleRenderer(current: string, back = false): string {
+	const index = RENDERER_ORDER.indexOf(current);
+	if (index < 0) return RENDERER_ORDER[0]!;
+	const next = back ? (index - 1 + RENDERER_ORDER.length) % RENDERER_ORDER.length : (index + 1) % RENDERER_ORDER.length;
+	return RENDERER_ORDER[next]!;
+}
+
+/** The mutable flag bits in cycle order, least significant first. */
+export const CYCLE_FLAGS: readonly ViewFlags[] = [
+	ViewFlags.ADDRESSES,
+	ViewFlags.TYPES,
+	ViewFlags.HIDE_CHANGES,
+	ViewFlags.ASCII,
+];
+
+/** Flip one flag bit on a spec, returning a fresh spec (never mutates the input). */
+export function withFlagToggle(spec: RenderSpec, flag: ViewFlags): RenderSpec {
+	return { ...spec, flags: (spec.flags ?? 0) ^ flag };
 }

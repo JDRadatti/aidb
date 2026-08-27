@@ -135,6 +135,35 @@ export interface Binding {
 
 export type ObservationCapability = "value" | "memory" | "tree" | "rows" | "lines" | "assembly" | "interleaved" | "samples";
 
+/** Orthogonal presentation toggles shared by watch entries and live panes. */
+export const ViewFlags = {
+	None: 0,
+	/** Show the address gutter / row offsets in memory views. */
+	ADDRESSES: 1 << 0,
+	/** Show a type/annotation line in the pane header. */
+	TYPES: 1 << 1,
+	/** Keep changed-byte highlighting *off* even when a previous stop exists. */
+	HIDE_CHANGES: 1 << 2,
+	/** Show the ASCII column in the `hexdump` renderer. */
+	ASCII: 1 << 3,
+} as const;
+export type ViewFlags = number;
+
+/** Machine-readable description of each flag bit for `/win pick` and AI tools. */
+export interface FlagDescriptor {
+	name: string;
+	description: string;
+}
+
+/** Ordered flag bit → metadata map; order is the human display/cycle order. */
+export const VIEW_FLAG_META: Record<number, FlagDescriptor> = {
+	[ViewFlags.None]: { name: "none", description: "Default presentation (no flags set)." },
+	[ViewFlags.ADDRESSES]: { name: "addresses", description: "Show address gutter and row offsets in memory views." },
+	[ViewFlags.TYPES]: { name: "types", description: "Show the observation's type in the pane header." },
+	[ViewFlags.HIDE_CHANGES]: { name: "hide-changes", description: "Disable changed-byte/cell highlighting." },
+	[ViewFlags.ASCII]: { name: "ascii", description: "Show the ASCII column in the hexdump renderer." },
+};
+
 export type OptionKind = "number" | "string" | "boolean" | "enum";
 
 /** Machine-readable option metadata for `/win pick` and future AI tools. */
@@ -174,9 +203,13 @@ export interface BitmapOptions {
 	scale?: "fit" | "1:1";
 }
 
-export interface Interpreter {
+	export interface Interpreter {
 	readonly id: string;
 	readonly title: string;
+	/** Example RenderSpec options for tooling/AI; nothing consumes these at runtime. */
+	readonly examples?: Record<string, unknown>[];
+	/** Flags applied when a render call passes no explicit flags (e.g. hexdump shows gutter+ascii). */
+	readonly defaultFlags?: ViewFlags;
 	/** Capabilities that must all be present for this renderer. */
 	readonly requires?: readonly ObservationCapability[];
 	/** Alternative capabilities; at least one must be present when declared. */
@@ -185,7 +218,7 @@ export interface Interpreter {
 	readonly options?: BytesOptions | CharsOptions | TupleOptions | BitmapOptions;
 	/** Schema describing configurable options for tooling and documentation. */
 	readonly optionSchema?: Record<string, OptionDescriptor>;
-	render(snap: BindingSnapshot | undefined, prev: BindingSnapshot | undefined, rect: Rect): string[];
+	render(snap: BindingSnapshot | undefined, prev: BindingSnapshot | undefined, rect: Rect, flags?: ViewFlags): string[];
 }
 
 /** Any pane content that wants re-evaluation after every stop. */
