@@ -70,6 +70,7 @@ const HELP = [
 	"",
 	"Slash aliases still work: /launch /attach /break /breaks /remove /stack /locals /status /help /quit",
 	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Topic help: help <topic> (e.g. help win).",
+	"Scroll: Ctrl+Up/Ctrl+Down (or PgUp/PgDn) scroll the active pane; Home/End",
 ].join("\n");
 
 const WIN_HELP = [

@@ -90,9 +90,12 @@ export class ReplTranscript extends Container {
 
 	handleInput(data: string): void {
 		const halfPage = Math.max(1, Math.floor(this.viewport / 2));
+		const fullPage = Math.max(1, Math.floor(this.viewport - 1));
 		if (matchesKey(data, "ctrl+up")) this.scrollBy(-halfPage);
-		else if (matchesKey(data, "ctrl+b")) this.scrollBy(-halfPage);
 		else if (matchesKey(data, "ctrl+down")) this.scrollBy(halfPage);
+		else if (matchesKey(data, "pageUp")) this.scrollBy(-fullPage);
+		else if (matchesKey(data, "pageDown")) this.scrollBy(fullPage);
+		else if (matchesKey(data, "ctrl+b")) this.scrollBy(-halfPage);
 		else if (matchesKey(data, "ctrl+f")) this.scrollBy(halfPage);
 		else if (matchesKey(data, "ctrl+u")) this.scrollBy(-halfPage);
 		else if (matchesKey(data, "ctrl+d")) this.scrollBy(halfPage);

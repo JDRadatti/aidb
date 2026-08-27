@@ -89,4 +89,14 @@ describe("ReplTranscript", () => {
 		assert.equal(t.isScrolledBack, false);
 		assert.deepEqual(t.render(80), ["", "", ""]);
 	});
+
+	it("pageUp/pageDown scroll (full page)", () => {
+		const t = make(3);
+		add(t, "a", "b", "c", "d", "e");
+		t.handleInput("\x1b[5~"); // pageUp
+		assert.equal(t.isScrolledBack, true);
+		t.handleInput("\x1b[6~"); // pageDown
+		assert.deepEqual(t.render(80).map((l) => l.trim()).slice(0, 3), ["c", "d", "e"]);
+		assert.equal(t.isScrolledBack, false);
+	});
 });

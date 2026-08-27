@@ -17,14 +17,14 @@
 		"env": {}
 	},
 	"keybindings": {
-		"//f": "actions: continue stepOver stepInto stepOut scrollUp scrollDown. Each is an array of chord strings. Ctrl+Up/Ctrl+Down scroll the active pane's scrollback (REPL or a live view).",
+		"//f": "actions: continue stepOver stepInto stepOut scrollUp scrollDown. Each is an array of chord strings. Ctrl+Up/PgUp scroll up, Ctrl+Down/PgDn scroll down the active pane's scrollback (REPL or a live view).",
 		"actions": {
 			"continue": ["f5"],
 			"stepOver": ["f10"],
 			"stepInto": ["f11"],
 			"stepOut": ["shift+f11"],
-			"scrollUp": ["ctrl+up"],
-			"scrollDown": ["ctrl+down"]
+			"scrollUp": ["ctrl+up", "pageUp"],
+			"scrollDown": ["ctrl+down", "pageDown"]
 		},
 		"//editor": "pi-tui built-in keybinding overrides; the editor reads these live.",
 		"editor": {

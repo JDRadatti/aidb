@@ -114,12 +114,21 @@ export abstract class View implements Component {
 
 	protected handleKey(data: string): boolean {
 		const halfPage = Math.max(1, Math.floor(this.viewportHeight / 2));
+		const fullPage = Math.max(1, Math.floor(this.viewportHeight - 1));
 		if (matchesKey(data, "g") || matchesKey(data, "home")) {
 			this.setCursor(0);
 			return true;
 		}
 		if (matchesKey(data, "shift+g") || matchesKey(data, "end")) {
 			this.setCursor(Math.max(0, this.ensureLines().length - 1));
+			return true;
+		}
+		if (matchesKey(data, "pageDown")) {
+			this.scrollBy(fullPage);
+			return true;
+		}
+		if (matchesKey(data, "pageUp")) {
+			this.scrollBy(-fullPage);
 			return true;
 		}
 		if (matchesKey(data, "ctrl+d")) {

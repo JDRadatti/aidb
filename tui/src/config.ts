@@ -104,8 +104,8 @@ export const DEFAULT_ACTIONS: Record<Action, KeyId[]> = {
 	stepOver: ["f10"],
 	stepInto: ["f11"],
 	stepOut: ["shift+f11"],
-	scrollUp: ["ctrl+up"],
-	scrollDown: ["ctrl+down"],
+	scrollUp: ["ctrl+up", "pageUp"],
+	scrollDown: ["ctrl+down", "pageDown"],
 };
 
 export const DEFAULT_EDITOR_BINDINGS: Record<string, KeyId[]> = {
