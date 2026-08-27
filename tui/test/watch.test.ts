@@ -147,10 +147,13 @@ describe("WatchListView", () => {
 		await flush();
 		assert.equal(reads, 1);
 
-		// Cycles through renderers in place using the cached bytes.
-		view.cycleRendererAt(0); // lines -> text -> bytes...
-		const spec = view.getEntries()[0]!.renderSpec;
-		assert.notEqual(spec.rendererId, "lines");
+		// Cycles through compatible renderers (lines -> text -> bytes...) in
+		// place using the cached bytes. The compatible subset is capped by what
+		// the observation can actually render.
+		view.cycleRendererAt(0); // lines -> text
+		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "text");
+		view.cycleRendererAt(0); // text -> bytes
+		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "bytes");
 		assert.equal(reads, 1, "renderer cycling must not refetch");
 
 		// Toggling a flags is render-only.
@@ -158,5 +161,21 @@ describe("WatchListView", () => {
 		view.toggleFlagAt(0, ViewFlags.ADDRESSES);
 		assert.notEqual(view.getEntries()[0]!.renderSpec.flags, before);
 		assert.equal(reads, 1, "flag toggling must not refetch");
+	});
+
+	it("cycling skips renderers the observation cannot consume", async () => {
+		// Value-only observation: no memory, tree, samples, rows, or lines.
+		const view = makeView({
+			evaluateDetailed: async (expr) => ({ result: `val:${expr}`, variablesReference: 0 }),
+		});
+		view.add("hp");
+		await flush();
+
+		// Only value/text renderers are compatible, so sparkline/struct-tree/table
+		// are skipped entirely.
+		view.cycleRendererAt(0);
+		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "text");
+		view.cycleRendererAt(0);
+		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "lines", "wraps back within the compatible subset");
 	});
 });
