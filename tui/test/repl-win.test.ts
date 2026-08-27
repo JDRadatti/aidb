@@ -152,6 +152,25 @@ describe("window commands", () => {
 		assert.match(messages.map((m) => m.text).join("\n"), /renderer text/);
 	});
 
+	it("each watch entry keeps an independent renderer", async () => {
+		const { ctx, windows } = makeContext();
+		await handleReplInput("/watch count", ctx);
+		await handleReplInput("/watch ptr", ctx);
+		const view = windows.component("watch") as WatchListView;
+		assert.equal(view.getEntries()[0].renderSpec.rendererId, "lines");
+		assert.equal(view.getEntries()[1].renderSpec.rendererId, "lines");
+
+		await handleReplInput("/watch cycle 0", ctx); // entry 0 -> text
+		await handleReplInput("/watch cycle 1", ctx); // entry 1 -> text
+		await handleReplInput("/watch cycle 0", ctx); // entry 0 wraps back to lines
+		assert.equal(view.getEntries()[0].renderSpec.rendererId, "lines");
+		assert.equal(view.getEntries()[1].renderSpec.rendererId, "text", "entry 1 independently cycles");
+
+		await handleReplInput("/watch flag types 0", ctx);
+		assert.notEqual(view.getEntries()[0].renderSpec.flags ?? 0, 0, "entry 0 flag on its own");
+		assert.equal(view.getEntries()[1].renderSpec.flags ?? 0, 0, "entry 1 flag untouched");
+	});
+
 	it("/watch flag toggles a flag on an entry by name", async () => {
 		const { ctx, windows } = makeContext();
 		await handleReplInput("/watch i", ctx);
