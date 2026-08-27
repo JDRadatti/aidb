@@ -102,7 +102,7 @@ Build order (each step shippable):
 - [ ] **D** — full renderer-driven refetch on `/win pick` and watch entry renderer changes (partial: watch `setRenderSpec` refetches when budget grows)
 
 ### Up next
-- [ ] Phase 6: RenderSpec bitflags, `/win pick` options, renderer cycling keybinding, AI-facing registry export
+- [x] Phase 6: RenderSpec bitflags, `/win pick` options, renderer cycling keybinding, AI-facing registry export
 - [ ] Phase 7: AI inspection/scaffold tools, golden fixtures, plugin boundary
 
 ## Later / stretch
@@ -139,3 +139,4 @@ LATER:
 - gdb features are missing. like si 2 to go si twice
 - asm is not rendered ideally? maybe add some spacing? gdb make clear distinction between src and func name
 - if source file changes since last build, we should notify
+- better pane navigation/controls/resizing/etc... i like how herdr does it, but i can't really have that be the same, can I? maybe i can with a diff prefix?

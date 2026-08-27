@@ -31,8 +31,12 @@ The normal implementation result should be a renderer, renderer descriptor, fixt
   rendering through `renderInterpreter`; `setRenderSpec` reuses cached bytes when the budget allows.
 - [x] **Phase 6 (first half)** — `render-spec.ts` gives `RenderSpec { rendererId, options? }`, `requiredBytes()`,
   `canReuseObservation()`; `OptionDescriptor` + `optionSchema` per renderer; `INTERPRETERS` registry back /win pick.
-- [ ] **Phase 6 (flags + keybinding + AI metadata)** — this is the current stage, detailed below.
-- [ ] **Phase 7** — safe AI creation tools and plugin boundary.
+- [x] **Phase 6 (flags + keybinding + AI metadata)** — `ViewFlags` (const-object, `erasableSyntaxOnly` safe)
+  threaded into `RenderSpec` and every byte renderer/render path; `ViewFlags` stays render-time only so toggling
+  never refetches; `VIEW_FLAG_META` machine-readable flag metadata; `Interpreter.examples`;
+  renderer cycling (`cycleRenderer`) + per-flag toggling in `WatchListView` keys and `LivePaneView.toggleFlag`;
+  `/win pick <ref> <interpreter> | +flag` toggles live-pane flags from the console.
+- [ ] **Phase 7** — safe AI creation tools and plugin boundary (next).
 
 ### Phase 6 remainder: ViewFlags, renderer-loop flag toggling, and AI-facing metadata
 
