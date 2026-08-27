@@ -162,6 +162,7 @@ const WIN_SUBCOMMANDS: AutocompleteItem[] = [
 ];
 
 const VISUALS: AutocompleteItem[] = [
+	{ value: "watch", label: "watch", description: "live watch pane (add entries with /watch)" },
 	{ value: "regs", label: "regs", description: "registers" },
 	{ value: "mem", label: "mem", description: "memory at an expression" },
 	{ value: "plot", label: "plot", description: "sparkline samples of an expression" },

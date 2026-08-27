@@ -95,11 +95,12 @@ const WIN_HELP = [
 	"  /watch list | cycle [n] | flag <name> [n] | del <n>   manage watch entries:",
 	"                                              cycle the renderer or toggle a flag on",
 	"                                              entry n (default: the last added)",
-	"  /win load <idx|name> <what>                 bind a live visualizer into a pane:",
-	"                                              regs · mem <expr> [bytes] · plot n ·",
-	"                                              tree player · source · asm",
+	"  /win load <idx|name> <what>                 bind a view into a pane:",
+	"                                              watch · regs · mem <expr> · plot <expr>",
+	"                                              · tree <expr> · source · asm",
 	"                                              mem suffix is raw byte count (default 192),",
 	"                                              not tuples — e.g. mem frame 12 = 12 bytes",
+	"                                              watch mounts a live watch pane; /watch adds entries",
 	"  /win pick [idx|name] [view|+flag]           list interpreters, or swap one in place;",
 	"                                              toggle a render flag with /win pick <ref> +flag",
 	"",
@@ -730,7 +731,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 		}
 		case "load": {
 			if (rest.length < 2) {
-				io.error("Usage: /win load <idx|name> regs | mem <expr> | plot <expr> | tree <expr> | source | asm");
+				io.error("Usage: /win load <idx|name> watch | regs | mem <expr> | plot <expr> | tree <expr> | source | asm");
 				return;
 			}
 			const target = windows.resolve(rest[0]);
@@ -742,9 +743,19 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 				io.error("'repl' hosts the transcript — split first: /win vsplit live");
 				return;
 			}
-			const parsed = parseLoadSpec(rest.slice(1).join(" "));
+			// A lone `watch` binds a live watch window (WatchListView) into the
+			// pane, converting it in place — same content a `watch`-named split
+			// or /watch auto-creation would mount.
+			const specWords = rest.slice(1);
+			if ((specWords[0] ?? "") === "watch" && specWords.length === 1) {
+				windows.mount(target, makeWatchView(ctx, target));
+				windows.switchTo(target);
+				io.success(`Bound '${target}' to a live watch pane. /watch <expr> adds expressions.`);
+				return;
+			}
+			const parsed = parseLoadSpec(specWords.join(" "));
 			if (!parsed) {
-				io.error(`Cannot visualize '${rest.slice(1).join(" ")}'. Try: regs · mem &buf · plot n · tree player · source · asm`);
+				io.error("Cannot visualize " + JSON.stringify(specWords.join(" ")) + `. Try: watch · regs · mem <expr> · plot <expr> · tree <expr> · source · asm`);
 				return;
 			}
 			const view = new LivePaneView(parsed.binding, parsed.interpreterId, makeFetchCtx(ctx), {
