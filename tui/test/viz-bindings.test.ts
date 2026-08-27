@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, parseGdbNumber } from "../src/viz/bindings.ts";
+import { AssemblyBinding, ExpressionBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, parseGdbNumber } from "../src/viz/bindings.ts";
 import type { FetchCtx, VarNode } from "../src/viz/types.ts";
 
 function makeCtx(over: Partial<FetchCtx> = {}): FetchCtx {
@@ -45,6 +45,55 @@ describe("MemoryBinding", () => {
 	});
 });
 
+describe("ExpressionBinding", () => {
+	it("evaluates once and reads bytes through the returned memoryReference", async () => {
+		const requests: Array<{ expression: string; count: number; offset?: number }> = [];
+		const binding = new ExpressionBinding("frame", 12, 3);
+		const snap = await binding.fetch(makeCtx({
+			evaluateDetailed: async () => ({
+				result: "{...}",
+				type: "struct Pixel [4]",
+				variablesReference: 4,
+				memoryReference: "0x601000",
+			}),
+			readMemory: async (expression, count, offset) => {
+				requests.push({ expression, count, offset });
+				return { address: "0x601003", data: new Uint8Array([1, 2, 3]) };
+			},
+		}));
+
+		assert.deepEqual(requests, [{ expression: "0x601000", count: 12, offset: 3 }]);
+		assert.equal(snap.kind, "expression");
+		assert.equal(snap.type, "struct Pixel [4]");
+		assert.equal(snap.memoryReference, "0x601000");
+		assert.equal(snap.address, "0x601003");
+		assert.deepEqual(Array.from(snap.bytes!), [1, 2, 3]);
+	});
+
+	it("keeps value and type when the expression is not addressable", async () => {
+		const snap = await new ExpressionBinding("1 + 2").fetch(makeCtx({
+			evaluateDetailed: async () => ({ result: "3", type: "int", variablesReference: 0 }),
+		}));
+
+		assert.equal(snap.value, "3");
+		assert.equal(snap.type, "int");
+		assert.equal(snap.bytes, undefined);
+		assert.match(snap.info!, /raw memory unavailable/);
+	});
+
+	it("keeps metadata when a raw memory read fails", async () => {
+		const snap = await new ExpressionBinding("frame", 8).fetch(makeCtx({
+			evaluateDetailed: async () => ({ result: "{...}", type: "Pixel [4]", variablesReference: 2, memoryReference: "0x601000" }),
+			readMemory: async () => { throw new Error("unmapped"); },
+		}));
+
+		assert.equal(snap.type, "Pixel [4]");
+		assert.equal(snap.memoryReference, "0x601000");
+		assert.match(snap.info!, /unmapped/);
+		assert.equal(snap.error, undefined);
+	});
+});
+
 describe("SeriesBinding", () => {
 	it("samples numeric values into the ring", async () => {
 		const binding = new SeriesBinding("hp");
@@ -78,12 +127,18 @@ describe("TreeBinding", () => {
 
 	function ctx(): FetchCtx {
 		return makeCtx({
-			evaluateDetailed: async () => ({ result: "{...}", variablesReference: 100 }),
+			evaluateDetailed: async () => ({
+				result: "{...}",
+				type: "struct Player",
+				variablesReference: 100,
+				namedVariables: 2,
+				memoryReference: "0x55f1a0",
+			}),
 			getVariableChildren: async (ref) =>
 				ref === 100
 					? [
-							{ name: "hp", value: "99", hasChildren: false },
-							{ name: "pos", value: "{...}", type: "Vec2", hasChildren: true, ref: 200 },
+							{ name: "hp", value: "99", type: "int", hasChildren: false, evaluateName: "player.hp", memoryReference: "0x55f1a0" },
+							{ name: "pos", value: "{...}", type: "Vec2", hasChildren: true, ref: 200, variablesReference: 200, evaluateName: "player.pos", memoryReference: "0x55f1a4", namedVariables: 2 },
 						]
 					: [posChild],
 		});
@@ -93,8 +148,14 @@ describe("TreeBinding", () => {
 		const snap = await new TreeBinding("player", 2).fetch(ctx());
 
 		assert.equal(snap.tree!.value, "{...}");
+		assert.equal(snap.tree!.type, "struct Player");
+		assert.equal(snap.tree!.memoryReference, "0x55f1a0");
+		assert.equal(snap.tree!.ref, 100);
 		const [, pos] = snap.tree!.children!;
 		assert.equal(pos.type, "Vec2");
+		assert.equal(pos.evaluateName, "player.pos");
+		assert.equal(pos.memoryReference, "0x55f1a4");
+		assert.equal(pos.namedVariables, 2);
 		assert.equal(pos.children![0].name, "x");
 	});
 

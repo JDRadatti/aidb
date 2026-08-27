@@ -14,13 +14,23 @@ export interface Rect {
 	height: number;
 }
 
-export type BindingKind = "memory" | "series" | "tree" | "registers" | "source" | "assembly" | "interleaved";
+export type BindingKind = "expression" | "memory" | "series" | "tree" | "registers" | "source" | "assembly" | "interleaved";
 
 /** A node of an expanded expression tree (struct-tree interpreter input). */
 export interface VarNode {
 	name: string;
 	value: string;
 	type?: string;
+	/** DAP expression that can be evaluated again for this value. */
+	evaluateName?: string;
+	/** DAP address for reading the value as raw memory when available. */
+	memoryReference?: string;
+	/** DAP reference used to request this node's children. */
+	variablesReference?: number;
+	/** DAP container-size hints for indexed or named children. */
+	namedVariables?: number;
+	indexedVariables?: number;
+	presentationHint?: Record<string, unknown>;
 	/** True when the node reports a live variablesReference (children exist). */
 	hasChildren: boolean;
 	/**
@@ -34,7 +44,10 @@ export interface VarNode {
 /** Structural subset of DAP's evaluate response that bindings rely on. */
 export interface EvalInfo {
 	result: string;
+	type?: string;
 	variablesReference: number;
+	namedVariables?: number;
+	indexedVariables?: number;
 	memoryReference?: string;
 }
 
@@ -83,6 +96,11 @@ export interface BindingSnapshot {
 	kind: BindingKind;
 	/** Display value (series last value, fallback text). */
 	value?: string;
+	type?: string;
+	memoryReference?: string;
+	variablesReference?: number;
+	namedVariables?: number;
+	indexedVariables?: number;
 	tree?: VarNode;
 	/** Sample history for sparklines; index 0 = oldest stop. */
 	samples?: number[];
@@ -115,9 +133,58 @@ export interface Binding {
 	reset?(): void;
 }
 
+export type ObservationCapability = "value" | "memory" | "tree" | "rows" | "lines" | "assembly" | "interleaved" | "samples";
+
+export type OptionKind = "number" | "string" | "boolean" | "enum";
+
+/** Machine-readable option metadata for `/win pick` and future AI tools. */
+export interface OptionDescriptor {
+	kind: OptionKind;
+	description: string;
+	required?: boolean;
+	default?: unknown;
+	enum?: readonly string[];
+}
+
+export interface BytesOptions {
+	/** Bytes per row before wrapping; auto when omitted. */
+	columns?: number;
+}
+
+export interface CharsOptions {
+	encoding?: "latin1" | "utf8";
+	nonPrintable?: "dot" | "hex" | "escape";
+	/** Stop at the first zero byte; the default for C string buffers. */
+	stopAtNull?: boolean;
+}
+
+export interface TupleOptions {
+	elementWidth: 1 | 2 | 4 | 8;
+	signed?: boolean;
+	format?: "dec" | "hex" | "float";
+	/** Elements grouped into one printed tuple, e.g. 3 for RGB. */
+	tupleWidth?: number;
+}
+
+export interface BitmapOptions {
+	width?: number;
+	height?: number;
+	tupleWidth?: number;
+	channelOrder?: "rgb" | "bgr" | "rgba" | "gray";
+	scale?: "fit" | "1:1";
+}
+
 export interface Interpreter {
 	readonly id: string;
 	readonly title: string;
+	/** Capabilities that must all be present for this renderer. */
+	readonly requires?: readonly ObservationCapability[];
+	/** Alternative capabilities; at least one must be present when declared. */
+	readonly requiresAny?: readonly ObservationCapability[];
+	/** Typed options this renderer understands; defaults are baked into registry entries. */
+	readonly options?: BytesOptions | CharsOptions | TupleOptions | BitmapOptions;
+	/** Schema describing configurable options for tooling and documentation. */
+	readonly optionSchema?: Record<string, OptionDescriptor>;
 	render(snap: BindingSnapshot | undefined, prev: BindingSnapshot | undefined, rect: Rect): string[];
 }
 

@@ -16,6 +16,65 @@ export function parseGdbNumber(text: string): number | null {
 }
 
 /**
+ * Evaluates one expression and enriches its value with type metadata and raw
+ * memory when GDB reports a usable memoryReference. A missing or failed memory
+ * read is non-fatal: value-only expressions are still useful to renderers.
+ */
+export class ExpressionBinding implements Binding {
+	readonly kind = "expression" as const;
+	readonly expr: string;
+	readonly byteCount: number;
+	readonly offset: number;
+
+	constructor(expr: string, byteCount = 192, offset = 0) {
+		this.expr = expr;
+		this.byteCount = byteCount;
+		this.offset = offset;
+	}
+
+	identity(): string {
+		return `expression:${this.expr}:${this.byteCount}:${this.offset}`;
+	}
+
+	describe(): string {
+		return this.expr;
+	}
+
+	async fetch(ctx: FetchCtx): Promise<BindingSnapshot> {
+		let info;
+		try {
+			info = await ctx.evaluateDetailed(this.expr);
+		} catch (error) {
+			return { kind: this.kind, error: message(error) };
+		}
+
+		const snapshot: BindingSnapshot = {
+			kind: this.kind,
+			value: info.result,
+			type: info.type,
+			memoryReference: info.memoryReference,
+			variablesReference: info.variablesReference,
+			namedVariables: info.namedVariables,
+			indexedVariables: info.indexedVariables,
+		};
+		if (!info.memoryReference) {
+			snapshot.info = "raw memory unavailable for this expression";
+			return snapshot;
+		}
+
+		try {
+			const read = await ctx.readMemory(info.memoryReference, this.byteCount, this.offset);
+			snapshot.address = read.address;
+			snapshot.bytes = read.data;
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			snapshot.info = `raw memory unavailable: ${detail}`;
+		}
+		return snapshot;
+	}
+}
+
+/**
  * Memory at an address-expression, e.g. `&player` or `buf + 16`.
  * The byte length is fixed at construction; column layout is the
  * interpreter's business.
@@ -137,7 +196,13 @@ export class TreeBinding implements Binding {
 		const root: VarNode = {
 			name: this.expr,
 			value: info.result,
+			type: info.type,
+			memoryReference: info.memoryReference,
+			variablesReference: info.variablesReference,
+			namedVariables: info.namedVariables,
+			indexedVariables: info.indexedVariables,
 			hasChildren: info.variablesReference > 0,
+			ref: info.variablesReference > 0 ? info.variablesReference : undefined,
 		};
 		await this.expand(ctx, root, info.variablesReference, this.depth, hasBudget, takeSlot);
 		return { kind: this.kind, tree: root };
@@ -165,6 +230,12 @@ export class TreeBinding implements Binding {
 				name: child.name,
 				value: child.value,
 				type: child.type,
+				evaluateName: child.evaluateName,
+				memoryReference: child.memoryReference,
+				variablesReference: child.variablesReference,
+				namedVariables: child.namedVariables,
+				indexedVariables: child.indexedVariables,
+				presentationHint: child.presentationHint,
 				hasChildren: child.hasChildren,
 				ref: child.ref,
 			};
