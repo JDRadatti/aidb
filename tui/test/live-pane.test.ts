@@ -56,6 +56,7 @@ describe("parseLoadSpec", () => {
 
 	it("keeps multi-word expressions intact and rejects incomplete specs", () => {
 		assert.deepEqual(parseLoadSpec("mem buf + 4")?.binding.identity(), new MemoryBinding("buf + 4").identity());
+		assert.deepEqual(parseLoadSpec("mem frame 12")?.binding.identity(), new MemoryBinding("frame", 12).identity());
 		assert.equal(new MemoryBinding("&p").identity(), "mem:&p:192");
 		assert.equal(parseLoadSpec("mem"), undefined);
 		assert.equal(parseLoadSpec("plot"), undefined);
@@ -106,9 +107,9 @@ describe("LivePaneView", () => {
 		assert.equal(view.getInterpreterId(), "sparkline");
 		assert.match(view.title, /sparkline/);
 		const after = view.render(60).join("\n");
-		// A memory snapshot has no samples, so the sparkline degrades to its
-		// placeholder — proving the swap re-rendered without a refetch.
-		assert.match(after, /no samples yet/);
+		// A memory snapshot lacks samples, so the renderer reports its
+		// requirement without refetching or producing misleading output.
+		assert.match(after, /sparkline.*requires: samples/);
 		assert.notEqual(before, after);
 		assert.ok(!view.setInterpreter("nope"));
 	});
@@ -308,7 +309,12 @@ describe("refreshLivePanes covers viz panes too", () => {
 		await handleReplInput("/win vsplit live", ctx);
 		await handleReplInput("/win load live plot n", ctx);
 		await handleReplInput("/win hsplit 0 watch2", ctx);
-		ctx.windows.mount("watch2", new WatchListView(async (expr) => `${expr}=${values.n}`));
+		ctx.windows.mount("watch2", new WatchListView({
+			evaluate: async (expr) => `${expr}=${values.n}`,
+			evaluateDetailed: async (expr) => ({ result: `${expr}=${values.n}`, variablesReference: 0 }),
+			getVariableChildren: async () => [],
+			readMemory: async () => ({ address: "0x0", data: new Uint8Array(0) }),
+		}));
 
 		const live = windows.component("live") as LivePaneView;
 		const watch = windows.component("watch2") as WatchListView;

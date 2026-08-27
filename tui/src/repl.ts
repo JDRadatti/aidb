@@ -6,7 +6,7 @@ import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
 import { LivePaneView } from "./views/live-pane.ts";
-import { WatchListView, type WatchEvaluator } from "./views/watch.ts";
+import { WatchListView } from "./views/watch.ts";
 import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
@@ -49,11 +49,12 @@ const HELP = [
 	"  finish                      step out (Shift+F11)",
 	"  bt                          backtrace (aliases: backtrace, where)",
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
+	"  set <var> = <val>           assign in the current frame (uses `set variable` syntax)",
 	"  info locals | info args     variables and arguments of the current frame",
 	"  set disassembly-flavor intel|att   choose x86 Intel or AT&T syntax",
 	"  /win load <pane> iasm      source lines with mapped assembly beneath them",
 	"  /watch <expr>               pin an expression to a live watch pane across stops",
-	"  /win load <pane> <spec>     bind a live visualizer: regs · mem &x · plot n · tree s · source · asm",
+	"  /win load <pane> <spec>     bind a live visualizer: regs · mem <expr> [bytes] · plot n · tree s · source · asm",
 	"",
 	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | next | list;",
 	"  /win pick [idx] [view] swaps how a live pane renders; /switch <idx|name> focuses a pane.",
@@ -85,7 +86,10 @@ const WIN_HELP = [
 	"  /watch <expr>                               pin an expression to a live watch",
 	"                                              pane (auto-creates 'watch')",
 	"  /win load <idx|name> <what>                 bind a live visualizer into a pane:",
-	"                                              regs · mem &buf · plot n · tree player · source · asm",
+	"                                              regs · mem <expr> [bytes] · plot n ·",
+	"                                              tree player · source · asm",
+	"                                              mem suffix is raw byte count (default 192),",
+	"                                              not tuples — e.g. mem frame 12 = 12 bytes",
 	"  /win pick [idx|name] [view]                 list interpreters, or swap one in place",
 	"",
 	"Notes:",
@@ -145,8 +149,7 @@ function cwdHint(io: ReplIO): void {
  * of a blank slab. Expressions come from /watch since panes never take keys.
  */
 function makeWatchView(ctx: ReplContext, id: string): WatchListView {
-	const evaluator: WatchEvaluator = async (expr) => String(await ctx.getApi().evaluate(expr, "watch"));
-	return new WatchListView(evaluator, { id, onChange: () => ctx.requestRender() });
+	return new WatchListView(makeFetchCtx(ctx), { id, onChange: () => ctx.requestRender() });
 }
 
 /** The first unused id in the series "watch", "watch2", "watch3", ... */
@@ -206,7 +209,7 @@ export function parseLoadSpec(spec: string): { binding: Binding; interpreterId: 
 			return { binding: new RegistersBinding(), interpreterId: "table" };
 		case "mem":
 			if (!argument) return undefined;
-			return { binding: new MemoryBinding(argument), interpreterId: "hexdump" };
+			return parseMemLoadSpec(argument);
 		case "plot":
 			if (!argument) return undefined;
 			return { binding: new SeriesBinding(argument), interpreterId: "sparkline" };
@@ -228,6 +231,23 @@ export function parseLoadSpec(spec: string): { binding: Binding; interpreterId: 
 		default:
 			return undefined;
 	}
+}
+
+/** `mem frame`, `mem frame 48` (bytes), or `mem buf + 4` → binding + default hexdump. */
+function parseMemLoadSpec(argument: string): { binding: Binding; interpreterId: string } {
+	const parts = argument.trim().split(/\s+/);
+	let byteCount = 192;
+	let expr = argument.trim();
+	const last = parts.at(-1);
+	if (parts.length > 1 && last && /^\d+$/.test(last)) {
+		const candidate = parts.slice(0, -1).join(" ");
+		// Avoid treating address arithmetic (`buf + 4`) as a byte-count suffix.
+		if (!/[+\-*/&]/.test(candidate)) {
+			byteCount = Number.parseInt(last, 10);
+			expr = candidate;
+		}
+	}
+	return { binding: new MemoryBinding(expr, byteCount), interpreterId: "hexdump" };
 }
 
 /**
@@ -258,6 +278,12 @@ function makeFetchCtx(ctx: ReplContext): FetchCtx {
 				name: child.name,
 				value: child.value,
 				type: child.type || undefined,
+				evaluateName: child.evaluateName,
+				memoryReference: child.memoryReference,
+				variablesReference: child.variablesReference,
+				namedVariables: child.namedVariables,
+				indexedVariables: child.indexedVariables,
+				presentationHint: child.presentationHint,
 				hasChildren: child.variablesReference > 0,
 				ref: child.variablesReference > 0 ? child.variablesReference : undefined,
 			}));
@@ -295,6 +321,26 @@ async function passthrough(input: string, ctx: ReplContext): Promise<void> {
 	if (result !== undefined && result !== "") {
 		io.line(String(result));
 	}
+}
+
+/**
+ * GDB treats `set frame` as the frame-filter subcommand, not an array write.
+ * Rewrite `set lhs = rhs` to `set variable lhs=rhs`.
+ */
+async function handleSet(args: string, ctx: ReplContext): Promise<void> {
+	const trimmed = args.trim();
+	if (!trimmed) {
+		await passthrough("set", ctx);
+		return;
+	}
+	const assign = /^(.+?)\s*=\s*(.+)$/.exec(trimmed);
+	if (assign) {
+		const lhs = assign[1]!.trim();
+		const rhs = assign[2]!.trim();
+		await passthrough(`set variable ${lhs}=${rhs}`, ctx);
+		return;
+	}
+	await passthrough(`set ${trimmed}`, ctx);
 }
 
 /**
@@ -555,6 +601,10 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 		case "backtrace":
 		case "print":
 			await passthrough(input, ctx);
+			break;
+
+		case "set":
+			if (requireStopped(api, io)) await handleSet(args, ctx);
 			break;
 
 		case "attach": {

@@ -1,14 +1,25 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { WatchListView } from "../src/views/watch.ts";
+import type { FetchCtx } from "../src/viz/types.ts";
 
 const flush = async (): Promise<void> => {
 	await new Promise((resolve) => setImmediate(resolve));
 	await new Promise((resolve) => setImmediate(resolve));
 };
 
-function makeView(evaluate?: (expr: string) => Promise<string>): WatchListView {
-	return new WatchListView(evaluate ?? ((expr) => Promise.resolve(`val:${expr}`)));
+function makeFetchCtx(over: Partial<FetchCtx> = {}): FetchCtx {
+	return {
+		evaluate: async (expr) => `val:${expr}`,
+		evaluateDetailed: async (expr) => ({ result: `val:${expr}`, variablesReference: 0 }),
+		getVariableChildren: async () => [],
+		readMemory: async () => ({ address: "0x4000", data: new Uint8Array(0) }),
+		...over,
+	};
+}
+
+function makeView(over: Partial<FetchCtx> = {}): WatchListView {
+	return new WatchListView(makeFetchCtx(over));
 }
 
 const key = (s: string) => s;
@@ -49,16 +60,18 @@ describe("WatchListView", () => {
 		view.add("a");
 		view.add("b");
 		await flush();
-		view.handleInput(key("k")); // cursor from b up to a
+		view.handleInput(key("k"));
 		view.handleInput(key("d"));
 		assert.deepEqual(view.getEntries().map((e) => e.expr), ["b"]);
 	});
 
 	it("enter re-evaluates the entry under the cursor", async () => {
 		let calls = 0;
-		const view = makeView(() => {
-			calls++;
-			return Promise.resolve(String(calls));
+		const view = makeView({
+			evaluateDetailed: async (expr) => {
+				calls++;
+				return { result: String(calls), variablesReference: 0 };
+			},
 		});
 		view.add("hp");
 		await flush();
@@ -70,7 +83,11 @@ describe("WatchListView", () => {
 	});
 
 	it("evaluator failures are shown as errors, not thrown", async () => {
-		const view = makeView(() => Promise.reject(new Error("No symbol \"x\"")));
+		const view = makeView({
+			evaluateDetailed: async () => {
+				throw new Error('No symbol "x"');
+			},
+		});
 		view.add("x");
 		await flush();
 		const lines = view.render(60).join("\n");
@@ -85,7 +102,7 @@ describe("WatchListView", () => {
 		view.handleInput(key("o"));
 		view.handleInput(key("a"));
 		view.handleInput(key("b"));
-		view.handleInput(key("\x7f")); // backspace
+		view.handleInput(key("\x7f"));
 		assert.equal(view.getPrompt(), "a");
 	});
 
@@ -94,7 +111,25 @@ describe("WatchListView", () => {
 		view.add("one");
 		view.render(40);
 		view.handleInput(key("o"));
-		view.handleInput(key("j")); // part of the expression, not a cursor move
+		view.handleInput(key("j"));
 		assert.equal(view.getPrompt(), "j");
+	});
+
+	it("re-renders from cache when switching between memory renderers", async () => {
+		let reads = 0;
+		const view = makeView({
+			evaluateDetailed: async () => ({ result: "buf", type: "char [8]", variablesReference: 0, memoryReference: "0x1000" }),
+			readMemory: async () => {
+				reads++;
+				return { address: "0x1000", data: new Uint8Array([0x41, 0x42, 0x43, 0x00]) };
+			},
+		});
+		view.add("message");
+		await flush();
+		assert.equal(reads, 1);
+		assert.ok(view.setRenderSpec(0, { rendererId: "bytes" }));
+		await flush();
+		assert.equal(reads, 1, "bytes renderer should reuse the cached observation");
+		assert.match(view.getEntries()[0]!.value!, /41 42 43/);
 	});
 });

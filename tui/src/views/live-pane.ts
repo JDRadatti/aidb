@@ -11,7 +11,7 @@
  */
 
 import { View, type ViewOptions } from "../view.ts";
-import { INTERPRETERS } from "../viz/interpreters.ts";
+import { INTERPRETERS, renderInterpreter } from "../viz/interpreters.ts";
 import type { Binding, BindingSnapshot, FetchCtx, LivePane, Rect } from "../viz/types.ts";
 
 export class LivePaneView extends View implements LivePane {
@@ -122,6 +122,6 @@ export class LivePaneView extends View implements LivePane {
 		const interpreter = INTERPRETERS[this.interpreterId];
 		if (!interpreter) return [`✗ unknown view '${this.interpreterId}'`];
 		const rect: Rect = { width, height: this.getViewportHeight() };
-		return interpreter.render(this.snap, this.prevSnap, rect);
+		return renderInterpreter(interpreter, this.snap, this.prevSnap, rect);
 	}
 }

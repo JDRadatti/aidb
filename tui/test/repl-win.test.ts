@@ -5,6 +5,7 @@ import { handleReplInput, refreshLivePanes, type ReplContext, type ReplIO } from
 import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
 import { WatchListView } from "../src/views/watch.ts";
+import type { FetchCtx } from "../src/viz/types.ts";
 
 function makeContext(api: Record<string, unknown> = {}) {
 	const messages: Array<{ kind: string; text: string }> = [];
@@ -18,11 +19,20 @@ function makeContext(api: Record<string, unknown> = {}) {
 	const panes = new Map<string, Component>([["repl", { render: () => [], invalidate: () => {} }]]);
 	const windows = new WindowManager(new SplitTree("repl"), { panes });
 	const ctx: ReplContext = {
-		getApi: () =>
-			({
-				evaluate: async (expr: string) => `${expr}=42`,
+		getApi: () => {
+			const evaluate = (api.evaluate as ((expr: string, context?: string) => Promise<string>) | undefined)
+				?? (async (expr: string) => `${expr}=42`);
+			return {
 				...api,
-			}) as never,
+				evaluate,
+				evaluateDetailed:
+					(api.evaluateDetailed as ((expr: string) => Promise<{ result: string; variablesReference: number }>) | undefined)
+					?? (async (expr: string) => ({ result: String(await evaluate(expr)), variablesReference: 0 })),
+				getVariableChildren: (api.getVariableChildren as FetchCtx["getVariableChildren"] | undefined) ?? (async () => []),
+				readMemory: (api.readMemory as FetchCtx["readMemory"] | undefined)
+					?? (async () => ({ address: "0x0", data: new Uint8Array(0) })),
+			} as never;
+		},
 		reset: async () => ({}) as never,
 		requestExit: () => {},
 		requestRender: () => {},
