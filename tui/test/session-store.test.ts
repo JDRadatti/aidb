@@ -150,6 +150,70 @@ describe("workspace stores (3-way split)", () => {
 		assert.equal(l.state.watchPanes.watch.entries[0]!.renderSpec.flags, 1);
 	});
 
+	it("live panes (source/asm/regs/...) survive a layout round-trip", async () => {
+		const { s } = tmp();
+		await s.layouts.save({
+			schemaVersion: LAYOUT_SCHEMA_VERSION, name: "code",
+			splitTree: { root: { dir: "v", children: ["repl", "src"], sizes: [1, 1] }, active: "src" },
+			watchPanes: {},
+			livePanes: {
+				src: { spec: { kind: "source" }, interpreterId: "code", flags: 4 },
+				mem: { spec: { kind: "mem", at: "&buf", byteCount: 48 }, interpreterId: "table" },
+				plot: { spec: { kind: "plot", expr: "hp", historySize: 60 }, interpreterId: "sparkline" },
+				tree: { spec: { kind: "tree", expr: "player", depth: 3 }, interpreterId: "struct-tree" },
+			},
+			savedAt: now(),
+		});
+		const l = s.layouts.load("code");
+		assert.ok(!("error" in l));
+		assert.deepEqual(l.state.livePanes?.src, { spec: { kind: "source" }, interpreterId: "code", flags: 4 });
+		assert.equal(l.state.livePanes?.mem.spec.byteCount, 48);
+		assert.equal(l.state.livePanes?.plot.spec.historySize, 60);
+		assert.equal(l.state.livePanes?.tree.spec.depth, 3);
+		const meta = s.layouts.list().find((m) => m.name === "code");
+		assert.equal(meta?.livePaneCount, 4);
+	});
+
+	it("legacy layouts without livePanes load as empty and round-trip", async () => {
+		const { s } = tmp();
+		// A v1 layout saved before live panes existed: no livePanes field.
+		fs.mkdirSync(s.layouts.dir, { recursive: true });
+		const file = path.join(s.layouts.dir, "old.json");
+		fs.writeFileSync(file, JSON.stringify({
+			schemaVersion: 1, name: "old",
+			splitTree: { root: { dir: "v", children: ["repl", "pane2"], sizes: [1, 1] }, active: "pane2" },
+			watchPanes: {},
+			savedAt: now(),
+		}));
+		const l = s.layouts.load("old");
+		assert.ok(!("error" in l));
+		assert.deepEqual(l.state.livePanes, {});
+	});
+
+	it("degrades malformed live panes instead of failing the layout", async () => {
+		const { s } = tmp();
+		// `minimal` is a valid pane (default interpreter/flags fill in) and is
+		// kept; unknown kinds and specs missing required params are dropped.
+		const livePanes = {
+			good: { spec: { kind: "source" }, interpreterId: "code" },
+			minimal: { spec: { kind: "asm" } },
+			badKind: { spec: { kind: "wat" }, interpreterId: "code" },
+			noExpr: { spec: { kind: "plot" }, interpreterId: "sparkline" },
+		} as unknown as import("../src/session-store.ts").SessionLivePanes;
+		await s.layouts.save({
+			schemaVersion: LAYOUT_SCHEMA_VERSION, name: "messy",
+			splitTree: { root: "repl", active: "repl" },
+			watchPanes: {},
+			livePanes,
+			savedAt: now(),
+		});
+		const l = s.layouts.load("messy");
+		assert.ok(!("error" in l));
+		assert.deepEqual(Object.keys(l.state.livePanes ?? {}), ["good", "minimal"]);
+		assert.equal(l.state.livePanes?.minimal.interpreterId, "code"); // defaulted from kind
+		assert.equal(l.state.livePanes?.minimal.flags, undefined);
+	});
+
 	it("per-session UUID isolates implicit profiles so nothing clobbers another's data", async () => {
 		const { s } = tmp();
 		// Regression: creating a new session used to flush an EMPTY layout into

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Component } from "@earendil-works/pi-tui";
-import { handleReplInput, parseLoadSpec, refreshLivePanes, type ReplContext, type ReplIO } from "../src/repl.ts";
+import { handleReplInput, makeLivePaneView, parseLoadSpec, refreshLivePanes, type ReplContext, type ReplIO } from "../src/repl.ts";
 import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
 import { LivePaneView } from "../src/views/live-pane.ts";
 import { WatchListView } from "../src/views/watch.ts";
-import { InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding } from "../src/viz/bindings.ts";
+import { ExpressionBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding, bindingFromSpec, specFromBinding } from "../src/viz/bindings.ts";
 import { ViewFlags } from "../src/viz/types.ts";
-import type { BindingSnapshot } from "../src/viz/types.ts";
+import type { BindingSnapshot, PaneBindingSpec } from "../src/viz/types.ts";
 
 function makeContext(api: Record<string, unknown> = {}) {
 	const messages: Array<{ kind: string; text: string }> = [];
@@ -67,7 +67,44 @@ describe("parseLoadSpec", () => {
 	});
 });
 
-describe("LivePaneView", () => {
+	describe("binding spec round-trip (layout persistence)", () => {
+		it("serializes and rebuilds every /win load binding", () => {
+			const cases: Array<[string, PaneBindingSpec]> = [
+				["regs", { kind: "regs" }],
+				["source", { kind: "source" }],
+				["asm", { kind: "asm" }],
+				["iasm", { kind: "iasm" }],
+				["mem buf + 4", { kind: "mem", at: "buf + 4", byteCount: 192 }],
+				["mem frame 12", { kind: "mem", at: "frame", byteCount: 12 }],
+				["plot hp", { kind: "plot", expr: "hp", historySize: 120 }],
+				["tree player", { kind: "tree", expr: "player", depth: 2 }],
+			];
+			for (const [spec, expected] of cases) {
+				const parsed = parseLoadSpec(spec)!;
+				assert.deepEqual(specFromBinding(parsed.binding), expected, `spec for ${spec}`);
+				const rebuilt = bindingFromSpec(expected);
+				assert.equal(rebuilt.identity(), parsed.binding.identity(), `identity for ${spec}`);
+			}
+		});
+
+		it("refuses bindings layouts can't save", () => {
+			assert.equal(specFromBinding(new ExpressionBinding("n")), undefined);
+		});
+
+		it("makeLivePaneView rebuilds a saved live pane verbatim", async () => {
+			const { ctx } = makeContext();
+			await handleReplInput("/win vsplit src", ctx);
+			await handleReplInput("/win load src source", ctx);
+			const view = ctx.windows.component("src") as LivePaneView;
+			const saved = { spec: specFromBinding(view.getBinding())!, interpreterId: view.getInterpreterId(), flags: view.getFlags() };
+
+			const rebuilt = makeLivePaneView(ctx, "src", saved);
+			assert.equal(rebuilt.getBindingIdentity(), view.getBindingIdentity());
+			assert.equal(rebuilt.getInterpreterId(), view.getInterpreterId());
+			assert.equal(rebuilt.getFlags(), view.getFlags());
+		});
+	});
+		describe("LivePaneView", () => {
 	function memoryView(over: Record<string, unknown> = {}) {
 		let readCalls = 0;
 		const ctx = makeContext({
