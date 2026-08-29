@@ -215,6 +215,17 @@ describe("openPicker", () => {
 		assert.ok(!pickerActive());
 	});
 
+	it("a kitty press+release pair steps once: the release parses as 'down' too", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		// Kitty protocol (flag 2) sends a release sequence after every press;
+		// both parse to the same key id and must act as ONE step.
+		h.send("\x1b[1;1B"); // down press
+		h.send("\x1b[1;1:3B"); // down release
+		h.send(ENTER);
+		assert.equal(h.picked?.value, "memleak", "one physical ↓ lands on the second item");
+	});
+
 	it("backspace un-narrows the filter", () => {
 		installPickerHost(null);
 		const h = harness(SESSIONS);

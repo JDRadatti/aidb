@@ -44,6 +44,7 @@
 import {
 	fuzzyFilter,
 	getKeybindings,
+	isKeyRelease,
 	matchesKey,
 	SelectList,
 	type TuiInputListener,
@@ -294,6 +295,19 @@ export function openPicker(options: PickerOptions): void {
 
 	const removeListener = host.addInputListener((data) => {
 		if (!active) return undefined;
+
+		// Kitty keyboard protocol (flag 2: report event types) sends a
+		// key-release sequence after every press, and the release parses to the
+		// same key id as the press (e.g. "\x1b[1;1B" press + "\x1b[1;1:3B"
+		// release are both `down`). pi-tui filters releases for focused
+		// components but NOT for addInputListener listeners, so without this a
+		// single physical arrow key would step the selection twice. Repeats
+		// (event type 2) deliberately still act — holding a key auto-repeats in
+		// legacy terminals too.
+		if (isKeyRelease(data)) {
+			return { consume: true };
+		}
+
 		const kb = getKeybindings();
 
 		// Inline delete confirm: only Enter (confirm) and Esc (back out) act.
