@@ -4,7 +4,37 @@
  * so panes can display them and retry on the next stop instead of throwing.
  */
 
-import type { AssemblyLine, Binding, BindingSnapshot, FetchCtx, InterleavedRow, VarNode } from "./types.ts";
+import type { AssemblyLine, Binding, BindingSnapshot, FetchCtx, InterleavedRow, PaneBindingSpec, VarNode } from "./types.ts";
+
+/**
+ * The persisted form of a binding — the `/win load` spec minus the keyword,
+ * structured so layouts can rebuild a pane without parsing display strings.
+ * Returns undefined for bindings layouts can't save (e.g. watch-list
+ * ExpressionBindings, which live in `watchPanes` instead).
+ */
+export function specFromBinding(binding: Binding): PaneBindingSpec | undefined {
+	if (binding instanceof RegistersBinding) return { kind: "regs" };
+	if (binding instanceof SourceBinding) return { kind: "source" };
+	if (binding instanceof AssemblyBinding) return { kind: "asm" };
+	if (binding instanceof InterleavedBinding) return { kind: "iasm" };
+	if (binding instanceof MemoryBinding) return { kind: "mem", at: binding.at, byteCount: binding.byteCount };
+	if (binding instanceof SeriesBinding) return { kind: "plot", expr: binding.expr, historySize: binding.historySize };
+	if (binding instanceof TreeBinding) return { kind: "tree", expr: binding.expr, depth: binding.depth };
+	return undefined;
+}
+
+/** Reconstruct a binding from a persisted layout spec (defaults fill gaps). */
+export function bindingFromSpec(spec: PaneBindingSpec): Binding {
+	switch (spec.kind) {
+		case "regs": return new RegistersBinding();
+		case "source": return new SourceBinding();
+		case "asm": return new AssemblyBinding();
+		case "iasm": return new InterleavedBinding();
+		case "mem": return new MemoryBinding(spec.at, spec.byteCount ?? 192);
+		case "plot": return new SeriesBinding(spec.expr, spec.historySize ?? 120);
+		case "tree": return new TreeBinding(spec.expr, spec.depth ?? 2);
+	}
+}
 
 /** Parse a gdb value string ("42", "0x10", "3.5e2", "100 'd'") to a number. */
 export function parseGdbNumber(text: string): number | null {

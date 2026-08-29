@@ -181,7 +181,7 @@ function layoutNameItems(ctx: ReplContext, current: string): AutocompleteItem[] 
 	const items = (ctx.sessions?.layouts.list() ?? []).map((l) => ({
 		value: l.name,
 		label: l.name,
-		description: `${l.panes} pane(s) · ${l.watchEntries} watch`,
+		description: `${l.panes} pane(s) · ${l.watchEntries} watch${l.livePaneCount ? ` · ${l.livePaneCount} live` : ""}`,
 	}));
 	return fuzzyItems(items, current);
 }

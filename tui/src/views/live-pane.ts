@@ -46,6 +46,11 @@ export class LivePaneView extends View implements LivePane {
 		return this.interpreterId;
 	}
 
+	/** The mounted binding; layout persistence serializes it via viz/bindings. */
+	getBinding(): Binding {
+		return this.binding;
+	}
+
 	/** Current render flags; undefined means "use the renderer's defaults". */
 	getFlags(): ViewFlags | undefined {
 		return this.flags;

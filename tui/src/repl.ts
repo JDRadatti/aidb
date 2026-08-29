@@ -7,13 +7,13 @@ import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
 import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView } from "./views/watch.ts";
-import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding } from "./viz/bindings.ts";
+import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
 import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
-import type { LayoutMeta, SessionMeta, TargetMeta } from "./session-store.ts";
+import type { LayoutMeta, SessionMeta, SessionLivePane, TargetMeta } from "./session-store.ts";
 export type { LayoutMeta, SessionMeta, TargetMeta };
 import { colors } from "./theme.ts";
 import { openPicker, type PickerItem, relativeTime } from "./picker.ts";
@@ -248,6 +248,18 @@ function makeWatchView(ctx: ReplContext, id: string): WatchListView {
 }
 /** Re-export so the host (main.ts) can re-mount watch panes on session restore. */
 export { makeWatchView };
+
+/**
+ * Rebuild a live pane (source/asm/regs/mem/plot/tree/iasm) from a layout's
+ * saved spec. Mirrors the `/win load` construction so restored panes behave
+ * identically: same binding params, interpreter and render flags.
+ */
+export function makeLivePaneView(ctx: ReplContext, id: string, saved: SessionLivePane): LivePaneView {
+	return new LivePaneView(bindingFromSpec(saved.spec), saved.interpreterId, makeFetchCtx(ctx), {
+		id,
+		onChange: () => ctx.requestRender(),
+	}, saved.flags);
+}
 
 /** The first unused id in the series "watch", "watch2", "watch3", ... */
 export function nextWatchId(windows: WindowManager): string {
@@ -1258,7 +1270,7 @@ const LAYOUTS_SPEC: CollectionSpec = {
 		return hooksApi.layouts.list().map((l) => ({
 			value: l.name,
 			label: `${l.name}${current === l.name ? " ✳" : ""}`,
-			description: `${l.panes} pane(s) · ${l.watchEntries} watch`,
+			description: `${l.panes} pane(s) · ${l.watchEntries} watch${l.livePaneCount ? ` · ${l.livePaneCount} live` : ""}`,
 		}));
 	},
 	onPick: (ctx, name) => {

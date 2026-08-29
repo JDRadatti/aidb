@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RenderSpec } from "./viz/render-spec.ts";
 import type { SplitTreeData } from "./split-tree.ts";
+import type { PaneBindingSpec } from "./viz/types.ts";
 
 export const TARGET_SCHEMA_VERSION = 1;
 export const LAYOUT_SCHEMA_VERSION = 1;
@@ -44,6 +45,20 @@ export interface SessionWatchEntry {
 
 export interface SessionWatchPanes {
 	[id: string]: { entries: SessionWatchEntry[] };
+}
+
+/** A live pane (`/win load <pane> source|asm|mem|...`) bound into a split cell. */
+export interface SessionLivePane {
+	/** The binding to reconstruct, e.g. `{ kind: "source" }` or `{ kind: "mem", at: "buf", byteCount: 48 }`. */
+	spec: PaneBindingSpec;
+	/** Interpreter the pane was last switched to (`/win pick`). */
+	interpreterId: string;
+	/** Render flags toggled via `/win pick +flag`; undefined = renderer defaults. */
+	flags?: number;
+}
+
+export interface SessionLivePanes {
+	[id: string]: SessionLivePane;
 }
 
 /* --- target --- */
@@ -72,6 +87,12 @@ export interface LayoutState {
 	name: string;
 	splitTree: SplitTreeData;
 	watchPanes: SessionWatchPanes;
+	/**
+	 * Live panes (source/asm/regs/mem/plot/tree/iasm) bound into split cells.
+	 * Optional and additive: layouts saved before live panes existed load as
+	 * `{}`, and older builds ignore the field — no schema bump required.
+	 */
+	livePanes?: SessionLivePanes;
 	savedAt: number;
 }
 export interface LayoutMeta {
@@ -80,10 +101,14 @@ export interface LayoutMeta {
 	savedAt?: number;
 	panes: number;
 	watchEntries: number;
+	/** Number of live (source/asm/...) panes bound into the layout. */
+	livePaneCount: number;
 	/** The saved split-tree, so the layout can be drawn/reapplied without re-reading. */
 	splitTree?: SplitTreeData;
 	/** Saved watch panes, so the layout can label each pane's content. */
 	watchPanes?: SessionWatchPanes;
+	/** Saved live panes, so the layout can label each pane's content. */
+	livePanes?: SessionLivePanes;
 }
 
 /* --- session --- */
@@ -156,6 +181,54 @@ function readTarget(raw: unknown): TargetState | { error: string } {
 	};
 }
 
+/** Default interpreter per binding kind — mirrors parseLoadSpec's pairing, used
+ * as a safe fallback when a layout doc lacks an explicit interpreterId. */
+const DEFAULT_LIVE_INTERPRETER: Record<PaneBindingSpec["kind"], string> = {
+	regs: "table",
+	mem: "hexdump",
+	plot: "sparkline",
+	tree: "struct-tree",
+	source: "code",
+	asm: "code",
+	iasm: "iasm",
+};
+
+/** Validate + normalize one persisted live pane (unknown kinds/params are dropped). */
+function readLivePane(raw: unknown): SessionLivePane | undefined {
+	if (!isPlainObject(raw)) return undefined;
+	const specRaw = raw.spec;
+	if (!isPlainObject(specRaw)) return undefined;
+	let spec: PaneBindingSpec;
+	switch (specRaw.kind) {
+		case "regs":
+		case "source":
+		case "asm":
+		case "iasm":
+			spec = { kind: specRaw.kind };
+			break;
+		case "mem": {
+			if (typeof specRaw.at !== "string") return undefined;
+			spec = { kind: "mem", at: specRaw.at, byteCount: typeof specRaw.byteCount === "number" ? specRaw.byteCount : 192 };
+			break;
+		}
+		case "plot": {
+			if (typeof specRaw.expr !== "string") return undefined;
+			spec = { kind: "plot", expr: specRaw.expr, historySize: typeof specRaw.historySize === "number" ? specRaw.historySize : 120 };
+			break;
+		}
+		case "tree": {
+			if (typeof specRaw.expr !== "string") return undefined;
+			spec = { kind: "tree", expr: specRaw.expr, depth: typeof specRaw.depth === "number" ? specRaw.depth : 2 };
+			break;
+		}
+		default:
+			return undefined;
+	}
+	const interpreterId = typeof raw.interpreterId === "string" && raw.interpreterId ? raw.interpreterId : DEFAULT_LIVE_INTERPRETER[spec.kind];
+	const flags = typeof raw.flags === "number" && Number.isInteger(raw.flags) && raw.flags >= 0 ? raw.flags : undefined;
+	return { spec, interpreterId, flags };
+}
+
 function readLayout(raw: unknown): LayoutState | { error: string } {
 	if (!isPlainObject(raw) || raw.schemaVersion !== LAYOUT_SCHEMA_VERSION) {
 		return { error: `unsupported or missing schema version (wanted ${LAYOUT_SCHEMA_VERSION})` };
@@ -183,11 +256,19 @@ function readLayout(raw: unknown): LayoutState | { error: string } {
 			if (entries.length > 0) watchPanes[paneId] = { entries };
 		}
 	}
+	const livePanes: SessionLivePanes = {};
+	if (isPlainObject(raw.livePanes)) {
+		for (const [paneId, value] of Object.entries(raw.livePanes)) {
+			const pane = readLivePane(value);
+			if (pane) livePanes[paneId] = pane;
+		}
+	}
 	return {
 		schemaVersion: LAYOUT_SCHEMA_VERSION,
 		name,
 		splitTree,
 		watchPanes,
+		livePanes,
 		savedAt: typeof raw.savedAt === "number" ? raw.savedAt : Date.now(),
 	};
 }
@@ -386,8 +467,10 @@ export function createStores(sessionDir: string): StateStores {
 		name: a.name, file, savedAt: a.savedAt,
 		panes: layoutPaneCount(a.splitTree),
 		watchEntries: Object.values(a.watchPanes).reduce((n, p) => n + p.entries.length, 0),
+		livePaneCount: Object.keys(a.livePanes ?? {}).length,
 		splitTree: a.splitTree,
 		watchPanes: a.watchPanes,
+		livePanes: a.livePanes,
 	});
 	const sessionMetaFn = (a: SessionState, file: string): SessionMeta => ({
 		name: a.name, file, savedAt: a.savedAt,

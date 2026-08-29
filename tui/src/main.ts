@@ -29,6 +29,7 @@ import {
 	getLastLaunch,
 	setLastLaunch,
 	makeWatchView,
+	makeLivePaneView,
 	isBarePickerCommand,
 	handleOpen,
 	type ReplContext,
@@ -42,6 +43,8 @@ import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
 import { WatchListView } from "./views/watch.ts";
+import { LivePaneView } from "./views/live-pane.ts";
+import { specFromBinding } from "./viz/bindings.ts";
 import {
 	createStores,
 	newSessionId,
@@ -53,6 +56,7 @@ import {
 	type SessionBreakpoint,
 	type SessionState,
 	type SessionWatchPanes,
+	type SessionLivePanes,
 	type StateStores,
 	type TargetState,
 } from "./session-store.ts";
@@ -265,6 +269,27 @@ function collectWatchPanes(): SessionWatchPanes {
 	return watchPanes;
 }
 
+/**
+ * Collect live panes (source/asm/regs/mem/plot/tree/iasm bound via
+ * `/win load`) so a layout snapshot can rebuild them exactly. Watch lists are
+ * handled by `collectWatchPanes`; bindings that can't serialize are skipped.
+ */
+function collectLivePanes(): SessionLivePanes {
+	const livePanes: SessionLivePanes = {};
+	for (const pane of windows.list()) {
+		const component = windows.component(pane.id);
+		if (!(component instanceof LivePaneView)) continue;
+		const spec = specFromBinding(component.getBinding());
+		if (!spec) continue;
+		livePanes[pane.id] = {
+			spec,
+			interpreterId: component.getInterpreterId(),
+			flags: component.getFlags(),
+		};
+	}
+	return livePanes;
+}
+
 function snapshotTargetState(): TargetState | undefined {
 	const t = getLastLaunch();
 	if (!t) return undefined;
@@ -347,6 +372,13 @@ function applyLayoutProfile(layout: LayoutState, s: StateStores): void {
 		const view = makeWatchView(replCtx, paneId);
 		view.restore(watchPane.entries);
 		windows.mount(paneId, view);
+	}
+	for (const [paneId, saved] of Object.entries(layout.livePanes ?? {})) {
+		const view = makeLivePaneView(replCtx, paneId, saved);
+		windows.mount(paneId, view);
+		// Fetch once so a restored source/asm pane shows content immediately
+		// instead of a blank slab until the next stop (mirrors /win load).
+		void view.refreshAll();
 	}
 	s.layouts.setActive(layout.name);
 }
@@ -523,6 +555,7 @@ const sessionsHooks: SessionHooks = {
 				name,
 				splitTree: windows.tree.serialize(),
 				watchPanes: collectWatchPanes(),
+				livePanes: collectLivePanes(),
 				savedAt: Date.now(),
 			});
 			updateStatus();

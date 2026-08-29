@@ -120,6 +120,21 @@ export interface BindingSnapshot {
 	error?: string;
 }
 
+/**
+ * Serialized form of a live pane's binding, so layouts can persist which
+ * visualizer a pane hosts (`/win load <pane> source` etc.). `kind` mirrors
+ * the /win load keywords; parameters are optional-with-defaults exactly like
+ * parseLoadSpec, so old/hand-edited docs degrade gracefully.
+ */
+export type PaneBindingSpec =
+	| { kind: "regs" }
+	| { kind: "source" }
+	| { kind: "asm" }
+	| { kind: "iasm" }
+	| { kind: "mem"; at: string; byteCount?: number }
+	| { kind: "plot"; expr: string; historySize?: number }
+	| { kind: "tree"; expr: string; depth?: number };
+
 export interface Binding {
 	readonly kind: BindingKind;
 	/** Cache/coalescing key; identical identities must fetch identically. */
