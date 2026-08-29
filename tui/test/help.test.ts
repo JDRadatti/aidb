@@ -40,7 +40,7 @@ describe("help", () => {
 			const { ctx, messages } = makeContext();
 			await handleReplInput(input, ctx);
 			const text = messages.join("\n");
-			assert.match(text, /\/switch <idx\|name>/, `${input}: missing /switch`);
+			assert.match(text, /\/win switch <idx\|name>/, `${input}: missing /win switch`);
 			assert.match(text, /vsplit/, `${input}: missing vsplit`);
 			assert.match(text, /indices/, `${input}: missing index warning`);
 		}

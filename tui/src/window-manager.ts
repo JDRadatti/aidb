@@ -4,7 +4,7 @@
  * Deliberately dumb while the mechanics are being proven:
  * - No modes, no key routing, no focus concept. The prompt is always live.
  * - Panes are addressed BY INDEX (position in `tree.panes()` order) from
- *   explicit commands like /switch 1 or /win close 2. Indices shift when a
+ *   explicit commands like /win switch 1 or /win close 2. Indices shift when a
  *   pane before them closes — /win list shows the current mapping.
  * - Every pane is framed by a box outline (white when active, subtle gray
  *   otherwise) and titled with its name; blank panes render an IndexSlab so
@@ -209,6 +209,22 @@ export class WindowManager implements Component {
 		}
 		this.register(id, component);
 		return { ok: true, value: null };
+	}
+
+	/**
+	 * Exchange the positions of two panes addressed by index or name — tmux
+	 * `swap-pane` style: each pane's content follows its id into the other's
+	 * cell, sizes stay put, and the first ref becomes active. `swap(b)` swaps
+	 * the active pane with `b`.
+	 */
+	swap(refA: number | string, refB?: number | string): SplitResult<null> {
+		const a = this.resolve(refA);
+		if (!a) return { ok: false, error: this.unresolvedMessage(refA) };
+		const b = refB === undefined ? this.tree.active : this.resolve(refB);
+		if (!b) return { ok: false, error: this.unresolvedMessage(refB ?? "") };
+		const result = this.tree.swap(a, b);
+		if (result.ok) this.changed();
+		return result;
 	}
 
 	/**

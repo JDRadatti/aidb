@@ -166,6 +166,28 @@ export class SplitTree {
 	}
 
 	/**
+	 * Exchange the positions of two panes: each keeps its content (components
+	 * follow pane ids) and moves into the other's cell. Every group's weights
+	 * stay where they are, so the geometry of the layout is unchanged — tmux
+	 * `swap-pane` semantics. The first pane (`idA`) becomes active.
+	 */
+	swap(idA: PaneId, idB: PaneId): SplitResult<null> {
+		const all = this.panes();
+		if (idA === idB) return { ok: false, error: "cannot swap a pane with itself" };
+		if (!all.includes(idA)) return { ok: false, error: `no such pane '${idA}'` };
+		if (!all.includes(idB)) return { ok: false, error: `no such pane '${idB}'` };
+
+		const transform = (node: TreeNode): TreeNode => {
+			if (!isGroup(node)) return node === idA ? idB : node === idB ? idA : node;
+			node.children = node.children.map(transform);
+			return node;
+		};
+		this.rootNode = transform(this.rootNode);
+		this.activePane = idA;
+		return { ok: true, value: null };
+	}
+
+	/**
 	 * Remove a pane; its space collapses into a neighbor. Groups reduced to a
 	 * single child dissolve into their parent. The last pane cannot be closed.
 	 */

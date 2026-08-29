@@ -91,6 +91,43 @@ describe("SplitTree", () => {
 		assert.equal(tree.active, "a");
 	});
 
+	it("swap exchanges two panes' positions and focuses the first", () => {
+		const tree = new SplitTree("repl");
+		tree.split("v", "a");
+		tree.split("v", "b"); // v(repl, a, b), active b
+		tree.setActive("repl");
+		assert.ok(tree.swap("repl", "a").ok); // focus follows the first arg: repl
+		assert.deepEqual(tree.panes(), ["a", "repl", "b"]);
+		assert.equal(tree.active, "repl");
+		const root = tree.root as any;
+		assert.deepEqual(root.children, ["a", "repl", "b"]);
+	});
+
+	it("swap works across nested groups and keeps weights in place", () => {
+		const tree = SplitTree.deserialize({
+			root: { dir: "v", children: ["x", { dir: "h", children: ["y", "z"], sizes: [1, 3] }], sizes: [100, 60] },
+			active: "y",
+		});
+		assert.ok(tree.swap("x", "z").ok);
+		const root = tree.root as any;
+		assert.deepEqual(root.children[0], "z");
+		assert.deepEqual(root.children[1].children, ["y", "x"]);
+		assert.deepEqual(root.sizes, [100, 60]);
+		assert.deepEqual(root.children[1].sizes, [1, 3]);
+		assert.equal(tree.active, "x");
+		// Geometry and membership survive a serialize/deserialize round trip.
+		const copy = SplitTree.deserialize(tree.serialize());
+		assert.deepEqual(copy.serialize(), tree.serialize());
+	});
+
+	it("swap refuses itself and unknown panes", () => {
+		const tree = new SplitTree("repl");
+		tree.split("v", "a");
+		assert.match(tree.swap("repl", "repl").error!, /itself/);
+		assert.match(tree.swap("nope", "repl").error!, /no such pane 'nope'/);
+		assert.match(tree.swap("repl", "nope").error!, /no such pane 'nope'/);
+	});
+
 	it("cycleFocus walks panes in order and wraps", () => {
 		const tree = new SplitTree("repl");
 		tree.split("v", "a"); // split focuses the new pane

@@ -87,7 +87,10 @@ const WIN_HELP = [
 	"                                              appears below",
 	"  /win close <idx|name>                       close that pane (the repl refuses)",
 	"  /win next                                   make the next pane active",
-	"  /switch <idx|name>                          make that pane active",
+	"  /win switch <idx|name>                      make that pane active",
+	"  /win swap <idx|name> [idx|name]             exchange two panes' cells (content",
+	"                                              follows the pane, weights stay); one",
+	"                                              ref swaps the active pane with it",
 	"  /win list                                   print idx -> id mapping (indices",
 	"                                              shift on close!)",
 	"  /watch <expr>                               pin an expression to a live watch",
@@ -822,7 +825,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 		}
 		default:
 			io.error(
-				`Usage: /win vsplit|hsplit [idx] [name] | load <idx|name> <spec> | pick [idx|name] [view] | close <idx|name> | next | list — 'help win' for details.`,
+				`Usage: /win vsplit|hsplit [idx] [name] | load <idx|name> <spec> | pick [idx|name] [view] | switch <idx|name> | swap <idx|name> [idx|name] | close <idx|name> | next | list — 'help win' for details.`,
 			);
 	}
 }
@@ -1030,20 +1033,6 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			const state = api.getState();
 			const location = api.sourceFile ? `${api.sourceFile}:${api.currentLine}` : "no location";
 			io.line(`state: ${state} | breakpoints: ${api.breakpoints.size} | thread: ${api.activeThreadId} | ${location}`);
-			break;
-		}
-
-		case "switch": {
-			const ref = rest[0];
-			if (ref === undefined || rest.length > 1) {
-				io.error("Usage: /switch <idx|name> — /win list shows indices");
-				return;
-			}
-			if (!ctx.windows.switchTo(ref)) {
-				io.error(/^\d+$/.test(ref) ? `No pane at index ${ref}. /win list shows indices.` : `No pane named '${ref}'.`);
-				return;
-			}
-			io.info(`Active pane: ${ctx.windows.active}`);
 			break;
 		}
 

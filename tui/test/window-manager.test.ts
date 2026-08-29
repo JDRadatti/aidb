@@ -93,6 +93,38 @@ describe("WindowManager", () => {
 		assert.equal(wm.active, "pane2");
 	});
 
+	it("swap exchanges cells; content follows the pane id", () => {
+		const wm = makeManager("repl");
+		wm.register("a", stubPane("A"));
+		assert.ok(wm.split("v", 0, "a").ok); // v(repl, a), active a
+		assert.ok(wm.swap("a", "repl").ok); // v(a, repl)
+		assert.deepEqual(wm.list().map((p) => p.id), ["a", "repl"]);
+		assert.equal(wm.active, "a");
+		assert.equal(wm.resolve(0), "a");
+		assert.equal(wm.resolve(1), "repl");
+		const row = wm.render(21).map(strip)[1]!;
+		const seam = row.indexOf("││");
+		assert.ok(row.slice(0, seam).includes("A"), "a's content sits in the left cell");
+		assert.ok(row.slice(seam).includes("R"), "repl content sits in the right cell");
+	});
+
+	it("swap with one ref swaps the active pane", () => {
+		const wm = makeManager("repl");
+		assert.ok(wm.split("v").ok); // repl | pane2, active pane2
+		assert.ok(wm.swap("repl").ok); // pane2 | repl
+		assert.deepEqual(wm.list().map((p) => p.id), ["pane2", "repl"]);
+		assert.equal(wm.active, "repl");
+	});
+
+	it("swap refuses itself and unknown panes", () => {
+		const wm = makeManager("repl");
+		assert.ok(wm.split("v").ok);
+		assert.match(wm.swap(0, 0).error!, /itself/);
+		assert.match(wm.swap("nope", 0).error!, /named 'nope'/);
+		assert.match(wm.swap(9, 0).error!, /index 9/);
+		assert.deepEqual(wm.list().map((p) => p.id), ["repl", "pane2"]);
+	});
+
 	it("cycle walks panes in index order", () => {
 		const wm = makeManager("repl");
 		assert.ok(wm.split("v").ok);
