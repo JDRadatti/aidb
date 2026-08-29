@@ -1,20 +1,12 @@
 // THsi is a comment
 #include <stdio.h>
 
-int func(int x, float y)
-{
-    return x + y;
-}
-
 int main(void) 
 {
-    int lets_do = 0;
-    int some_math = 10;
-    int g = lets_do + some_math;
+    int lets_do;
+    lets_do = 10;
     float f = 10.0;
-    float can_i_add_int_and_float = func(f, lets_do);
-
-    printf("I guess I can %f", can_i_add_int_and_float);
+    printf("float %f, lets_do %d", f, lets_do);
 
     int total = 0;
     for (int i = 0; i < 10; i++) 
