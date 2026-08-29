@@ -178,4 +178,25 @@ describe("WatchListView", () => {
 		view.cycleRendererAt(0);
 		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "lines", "wraps back within the compatible subset");
 	});
+
+	describe("restore", () => {
+		it("rehydrates persisted entries without fetching", () => {
+			const view = makeView();
+			view.restore([
+				{ expr: "&player", renderSpec: { rendererId: "hexdump", flags: ViewFlags.ADDRESSES }, byteCount: 192 },
+				{ expr: "hp", renderSpec: { rendererId: "lines" }, byteCount: 192 },
+			]);
+			const entries = view.getEntries();
+			assert.equal(entries.length, 2);
+			assert.equal(entries[0]!.expr, "&player");
+			assert.equal(entries[0]!.renderSpec.rendererId, "hexdump");
+			assert.equal(entries[0]!.renderSpec.flags, ViewFlags.ADDRESSES);
+			assert.equal(entries[0]!.pending, true);
+		});
+		it("ignores empty expressions", () => {
+			const view = makeView();
+			view.restore([{ expr: "", renderSpec: { rendererId: "lines" }, byteCount: 192 }]);
+			assert.equal(view.getEntries().length, 0);
+		});
+	});
 });

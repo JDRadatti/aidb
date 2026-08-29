@@ -138,7 +138,7 @@ class PaneChrome implements Component {
 }
 
 export class WindowManager implements Component {
-	readonly tree: SplitTree;
+	tree: SplitTree;
 	private deps: WindowManagerDeps;
 	private version = 0;
 	private cachedVersion = -1;
@@ -150,6 +150,16 @@ export class WindowManager implements Component {
 	constructor(tree: SplitTree, deps: WindowManagerDeps) {
 		this.tree = tree;
 		this.deps = deps;
+	}
+
+	/**
+	 * Session restore: swap in a deserialized layout and pre-register the
+	 * panes' contents. Existing per-pane components for ids the new tree
+	 * references are kept; unregistered ids render as blank slabs.
+	 */
+	restoreTree(tree: SplitTree): void {
+		this.tree = tree;
+		this.changed();
 	}
 
 	register(pane: PaneId, component: Component): void {

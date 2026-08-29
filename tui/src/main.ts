@@ -17,15 +17,42 @@ import { colors, applyTheme, createEditorTheme } from "./theme.ts";
 import {
 	loadConfig,
 	resolveAction,
+	actionKeyLabel,
 	type Action,
 	type Config,
 	type ConfigSources,
 } from "./config.ts";
-import { handleReplInput, refreshLivePanes, resetLivePanes, type ReplContext, type ReplIO } from "./repl.ts";
+import {
+	handleReplInput,
+	refreshLivePanes,
+	resetLivePanes,
+	getLastLaunch,
+	setLastLaunch,
+	makeWatchView,
+	type ReplContext,
+	type ReplIO,
+	type SessionHooks,
+} from "./repl.ts";
 import { AidbCompletionProvider, buildCommandRegistry } from "./slash.ts";
+import { renderIntro, type IntroState } from "./intro.ts";
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
+import { WatchListView } from "./views/watch.ts";
+import {
+	createStores,
+	newSessionId,
+	sessionScopedName,
+	TARGET_SCHEMA_VERSION,
+	LAYOUT_SCHEMA_VERSION,
+	SESSION_SCHEMA_VERSION,
+	type LayoutState,
+	type SessionBreakpoint,
+	type SessionState,
+	type SessionWatchPanes,
+	type StateStores,
+	type TargetState,
+} from "./session-store.ts";
 import { ReplTranscript } from "./repl-log.ts";
 import { ActivitySpinner } from "./spinner.ts";
 
@@ -68,7 +95,10 @@ panesById.set("repl", transcript);
 const windows = new WindowManager(new SplitTree("repl"), {
 	panes: panesById,
 	getViewRows: () => terminal.rows,
-	onChange: () => tui.requestRender(),
+	onChange: () => {
+		tui.requestRender();
+		markDirty();
+	},
 });
 
 function addLine(text: string): void {
@@ -121,6 +151,7 @@ function wireSession(api: DebuggerAPI): void {
 	api.on("breakpoints-changed", () => {
 		updateStatus();
 		refreshLivePanes(replCtx, false);
+		markDirty();
 	});
 
 	api.on("location", ({ file, line }) => {
@@ -146,6 +177,360 @@ function wireSession(api: DebuggerAPI): void {
 
 wireSession(dbg.api);
 
+/* --------------------------------------------------------- sessions --------
+ * Named persistence of debugger *setup* (target + breakpoints + layout +
+ * watch panes) into `~/.config/aidb/sessions/<name>.json`. Auto-saves on a
+ * ~1s debounce at the three hooks (target change, breakpoints, windows);
+ * flushes synchronously on quit.
+ *
+ * Layouts are the exception: the split-tree/watch arrangement only persists
+ * when the user explicitly runs `/layout save <name>` — never implicitly —
+ * so every tweak of the panes doesn't leak a near-identical profile. A
+ * session simply references the named layout (or none) it binds to.
+ * See sessions-plan.html.
+ */
+let stores: StateStores | null = null;
+let dirtyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function sessionsEnabled(): boolean {
+	return config.sessions.autoSave;
+}
+function store(): StateStores {
+	if (!stores) stores = createStores(config.sessions.sessionDir);
+	return stores;
+}
+
+/**
+ * The active session's stable identity (UUID). Implicit target/layout profiles
+ * are named `@<uuid>` so "session"-named or renamed sessions never collide.
+ * A fresh UUID is minted per `startNew`; restoring a session adopts its id.
+ */
+let sessionId: string | null = null;
+function currentSessionId(): string {
+	if (!sessionId) sessionId = newSessionId();
+	return sessionId;
+}
+function adoptSessionId(id?: string): void {
+	sessionId = id || newSessionId();
+}
+function resetSessionId(): void {
+	sessionId = newSessionId();
+}
+
+/** Name the active target profile: explicit active name, else a session-scoped implicit. */
+function activeTargetName(): string | null {
+	const explicit = store().targets.activeName();
+	if (explicit) return explicit;
+	const t = getLastLaunch();
+	if (!t) return null;
+	// Per-session implicit name keyed by the session's stable UUID.
+	return sessionScopedName(currentSessionId());
+}
+
+/**
+ * Name of the layout profile bound to this session, or null when the user
+ * hasn't saved one. Layouts persist only via explicit `/layout save <name>`;
+ * they are never auto-saved, so there is no implicit per-session profile.
+ */
+function activeLayoutName(): string | null {
+	return store().layouts.activeName();
+}
+
+/** Name the active session: explicit active name, else the program basename (D3), else "session". */
+function activeSessionName(): string {
+	const named = store().sessions.activeName();
+	if (named) return named;
+	const t = getLastLaunch();
+	return t ? (t.program.split("/").pop() || "session") : "session";
+}
+
+/** Collect watch entries from every live watch pane (shared by `/layout save` snapshots). */
+function collectWatchPanes(): SessionWatchPanes {
+	const watchPanes: SessionWatchPanes = {};
+	for (const pane of windows.list()) {
+		const component = windows.component(pane.id);
+		if (component instanceof WatchListView) {
+			watchPanes[pane.id] = {
+				entries: component.getEntries().map((entry) => ({
+					expr: entry.expr,
+					renderSpec: entry.renderSpec,
+					byteCount: entry.byteCount,
+				})),
+			};
+		}
+	}
+	return watchPanes;
+}
+
+function snapshotTargetState(): TargetState | undefined {
+	const t = getLastLaunch();
+	if (!t) return undefined;
+	return {
+		schemaVersion: TARGET_SCHEMA_VERSION,
+		name: activeTargetName() ?? "target",
+		kind: "launch",
+		program: t.program,
+		args: t.args,
+		savedAt: Date.now(),
+	};
+}
+
+function snapshotSessionState(): SessionState {
+	return {
+		schemaVersion: SESSION_SCHEMA_VERSION,
+		name: activeSessionName(),
+		id: currentSessionId(),
+		target: activeTargetName(),
+		layout: activeLayoutName(),
+		breakPoints: [...dbg.api.breakpoints.values()].map((bp) => ({
+			file: bp.file || undefined,
+			line: bp.line || undefined,
+			condition: bp.condition,
+			verified: bp.verified,
+			location: bp.location,
+		})),
+		savedAt: Date.now(),
+	};
+}
+
+/** Debounced auto-save (~1s). Flush synchronously on quit so nothing is lost. */
+function markDirty(): void {
+	if (!sessionsEnabled()) return;
+	if (dirtyTimer) clearTimeout(dirtyTimer);
+	dirtyTimer = setTimeout(() => {
+		dirtyTimer = null;
+		void flushSession();
+	}, 1000);
+}
+
+/** Immediate save of target + session stores. Clears any pending timer. Layouts are explicit-only. */
+async function flushSession(): Promise<void> {
+	if (dirtyTimer) {
+		clearTimeout(dirtyTimer);
+		dirtyTimer = null;
+	}
+	if (!sessionsEnabled()) return;
+	const s = store();
+	const target = snapshotTargetState();
+	if (target) await s.targets.save(target);
+	// Layouts are not auto-saved (explicit `/layout save <name>` only); the
+	// session snapshot just records which named layout it binds to, if any.
+	await s.sessions.save(snapshotSessionState());
+}
+
+/** Rebind a saved breakpoint into the live gdb. */
+async function restoreBreakpoint(bp: SessionBreakpoint): Promise<void> {
+	if (bp.location) {
+		try {
+			const out = await dbg.api.evaluate(`break ${bp.location}`, "repl");
+			const id = String(out ?? "").match(/Breakpoint (\d+)/);
+			if (id) dbg.api.trackExternalBreakpoint(Number(id[1]), bp.location, bp.file, bp.line);
+		} catch (error) {
+			replCtx.io.error(`break ${bp.location}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	} else if (bp.file && bp.line) {
+		try {
+			await dbg.api.setBreakpoint(bp.file, bp.line, bp.condition);
+		} catch (error) {
+			replCtx.io.error(`setBreakpoint ${bp.file}:${bp.line}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+}
+
+function applyLayoutProfile(layout: LayoutState, s: StateStores): void {
+	windows.restoreTree(SplitTree.deserialize(layout.splitTree));
+	for (const [paneId, watchPane] of Object.entries(layout.watchPanes)) {
+		if (!watchPane.entries.length) continue;
+		const view = makeWatchView(replCtx, paneId);
+		view.restore(watchPane.entries);
+		windows.mount(paneId, view);
+	}
+	s.layouts.setActive(layout.name);
+}
+
+/** Point gdb at a target profile (symbols only; never auto-runs). */
+async function loadTargetProfile(name: string): Promise<void> {
+	const s = store();
+	const tp = s.targets.load(name);
+	if ("error" in tp) {
+		replCtx.io.error(`target '${name}': ${tp.error}`);
+		return;
+	}
+	s.targets.setActive(name);
+	if (tp.state.kind === "launch" && tp.state.program) {
+		try {
+			await dbg.api.evaluate(`file ${tp.state.program}`, "repl");
+			setLastLaunch({ program: tp.state.program, args: [...tp.state.args] });
+			replCtx.io.success(`target '${name}': ${tp.state.program} — symbols loaded, type run.`);
+		} catch (error) {
+			replCtx.io.error(error instanceof Error ? error.message : String(error));
+		}
+	} else {
+		replCtx.io.info(`target '${name}' is an attach profile — use attach <pid>.`);
+	}
+	updateStatus();
+}
+
+/** Restore a layout profile into the live windows. */
+function loadLayoutProfile(name: string): void {
+	const s = store();
+	const lp = s.layouts.load(name);
+	if ("error" in lp) {
+		replCtx.io.error(`layout '${name}': ${lp.error}`);
+		return;
+	}
+	s.layouts.setActive(name);
+	applyLayoutProfile(lp.state, s);
+	updateStatus();
+	replCtx.io.success(`layout '${name}' — ${windowPaneCount()} panes.`);
+}
+
+/** Panes beyond the repl currently mounted. */
+function windowPaneCount(): number {
+	return Math.max(0, windows.list().length - 1);
+}
+
+/** Restore a session: target profile + layout profile + breakpoints. */
+async function restoreSession(name: string): Promise<void> {
+	const s = store();
+	const loaded = s.sessions.load(name);
+	if ("error" in loaded) {
+		replCtx.io.error(`Cannot restore: ${loaded.error}`);
+		return;
+	}
+	const snap = loaded.state;
+	s.sessions.setActive(snap.name);
+	// Adopt the session's stable id so its implicit target/layout profiles match.
+	adoptSessionId(snap.id);
+
+	// 1. Target profile — symbols only; never auto-run (D4).
+	if (snap.target) {
+		const tp = s.targets.load(snap.target);
+		if ("error" in tp) {
+			replCtx.io.error(`target '${snap.target}': ${tp.error}`);
+		} else {
+			s.targets.setActive(snap.target);
+			if (tp.state.kind === "launch" && tp.state.program) {
+				try {
+					await dbg.api.evaluate(`file ${tp.state.program}`, "repl");
+					setLastLaunch({ program: tp.state.program, args: [...tp.state.args] });
+					replCtx.io.info(`Reading symbols from ${tp.state.program}...`);
+				} catch (error) {
+					replCtx.io.error(error instanceof Error ? error.message : String(error));
+				}
+			} else {
+				replCtx.io.info(`target '${snap.target}' is an attach profile — attach <pid> when ready.`);
+			}
+		}
+	} else {
+		setLastLaunch(null);
+	}
+
+	// 2. Layout profile.
+	if (snap.layout) {
+		const lp = s.layouts.load(snap.layout);
+		if ("error" in lp) {
+			replCtx.io.error(`layout '${snap.layout}': ${lp.error}`);
+		} else {
+			s.layouts.setActive(snap.layout);
+			applyLayoutProfile(lp.state, s);
+		}
+	} else {
+		windows.restoreTree(SplitTree.deserialize({ root: "repl", active: "repl" }));
+	}
+
+	// 3. Breakpoints.
+	for (const bp of snap.breakPoints) await restoreBreakpoint(bp);
+
+	updateStatus();
+	replCtx.io.success(`restored "${snap.name}" — ${snap.breakPoints.length} bp · ${windowPaneCount()} panes (target: ${snap.target ?? "—"}, layout: ${snap.layout ?? "—"}). type run`);
+}
+
+/** Session / target / layout hooks handed to the REPL. */
+const sessionsHooks: SessionHooks = {
+	activeName: () => store().sessions.activeName(),
+	list: () => store().sessions.list(),
+	markDirty,
+	save: async (name?: string) => {
+		await flushSession();
+		if (name) {
+			store().sessions.setActive(name);
+			await store().sessions.save(snapshotSessionState());
+		}
+		const finalName = store().sessions.activeName() ?? activeSessionName();
+		replCtx.io.success(`Session saved as '${finalName}'.`);
+		updateStatus();
+	},
+	setCurrent: (name: string) => store().sessions.setActive(name),
+	remove: async (name: string) => {
+		await store().sessions.remove(name);
+	},
+	restore: restoreSession,
+	startNew: async (name?: string) => {
+		const chosen = name?.trim() || "session";
+		// A truly fresh slate: new gdb (no breakpoints), dropped target,
+		// single-pane layout, a fresh session and a fresh stable id.
+		await resetDebugger();
+		setLastLaunch(null);
+		windows.restoreTree(SplitTree.deserialize({ root: "repl", active: "repl" }));
+		store().sessions.setActive(chosen);
+		store().targets.clearActive();
+		store().layouts.clearActive();
+		resetSessionId();
+		await flushSession();
+		updateStatus();
+		replCtx.io.success(`New session '${chosen}' — fresh target. Break a line, then run.`);
+		printIntro();
+	},
+	targets: {
+		current: () => activeTargetName(),
+		list: () => store().targets.list(),
+		save: async (name?: string) => {
+			const state = snapshotTargetState();
+			if (!state) {
+				replCtx.io.warning(`No program set — nothing to save as a target profile.`);
+				return;
+			}
+			if (name) state.name = name;
+			store().targets.setActive(state.name);
+			await store().targets.save(state);
+			updateStatus();
+		},
+		load: loadTargetProfile,
+		remove: async (name: string) => {
+			await store().targets.remove(name);
+		},
+	},
+	layouts: {
+		current: () => store().layouts.activeName(),
+		list: () => store().layouts.list(),
+		save: async (name?: string) => {
+			const active = store().layouts.activeName();
+			if (!name) {
+				name = active ?? undefined;
+				if (!name) {
+					replCtx.io.error(`No active layout profile — /layout save <name>`);
+					return;
+				}
+				replCtx.io.info(`Saving changes to layout '${name}'.`);
+			}
+			store().layouts.setActive(name);
+			await store().layouts.save({
+				schemaVersion: LAYOUT_SCHEMA_VERSION,
+				name,
+				splitTree: windows.tree.serialize(),
+				watchPanes: collectWatchPanes(),
+				savedAt: Date.now(),
+			});
+			updateStatus();
+		},
+		load: loadLayoutProfile,
+		remove: async (name: string) => {
+			await store().layouts.remove(name);
+		},
+	},
+};
+
 function updateStatus(): void {
 	const api = dbg.api;
 	const state = api.getState();
@@ -155,8 +540,11 @@ function updateStatus(): void {
 		colors.muted("○");
 	const location = api.sourceFile ? `${api.sourceFile}:${api.currentLine}` : "—";
 	const panes = windows.list().map((p) => `${p.idx}${p.active ? "*" : ""}·${p.id}`).join(" ");
+	const sessionName = store().sessions.activeName();
+	const sessionPrefix = sessionName ? `${colors.accent(sessionName)} ` : "";
+	const sessionHint = store().sessions.list().length > 0 ? ` │ ${colors.muted("[Alt+O open]")}` : "";
 	statusBar.setText(
-		`${dot} ${state} │ ${panes} │ bp: ${api.breakpoints.size} │ ${location}`,
+		`${sessionPrefix}${dot} ${state} │ ${panes} │ bp: ${api.breakpoints.size} │ ${location}${sessionHint}`,
 	);
 	tui.requestRender();
 }
@@ -169,14 +557,79 @@ async function resetDebugger(): Promise<DebuggerAPI> {
 	return dbg.api;
 }
 
+/* ------------------------------------------------------------- intro banner ----- */
+
+/** Persisted command count from the history file (best-effort). */
+function historyCount(): number | null {
+	try {
+		if (!fs.existsSync(config.sessions.historyPath)) return null;
+		const lines = fs.readFileSync(config.sessions.historyPath, "utf8").split("\n");
+		return lines.filter((line) => line.trim().length > 0).length;
+	} catch {
+		return null;
+	}
+}
+
+/** Key-hint summary from the live action bindings (remap-aware). */
+function keysSummary(): string {
+	const actions = config.keybindings.actions;
+	const parts: string[] = [];
+	for (const action of ["continue", "stepOver", "stepInto", "stepOut"] as const) {
+		parts.push(`${actionKeyLabel(actions, action)} ${action}`);
+	}
+	return parts.join(" · ");
+}
+
+/** Build the banner state from the live stores/config/api. */
+function introState(): IntroState {
+	const t = getLastLaunch();
+	const breakpoints = [...dbg.api.breakpoints.values()];
+	const pending = breakpoints.filter((bp) => !bp.verified).length;
+	const panes = windows.list().map((p) => p.id);
+	return {
+		debuggerLabel: "aidb — GDB debugger via DAP",
+		gdbState: dbg.api.getState(),
+		session: {
+			name: store().sessions.activeName(),
+			breakpoints: breakpoints.length,
+			pending,
+			autoSave: config.sessions.autoSave,
+		},
+		target: t ? { name: activeTargetName(), program: t.program, args: t.args, kind: "launch" } : null,
+		layout: {
+			name: store().layouts.activeName(),
+			paneIds: panes,
+		},
+		viz: ["regs", "mem", "plot", "tree", "source", "asm", "iasm"],
+		keys: keysSummary(),
+		config: {
+			found: [configSources.project, configSources.rc].filter((f): f is string => Boolean(f)),
+			issues: configSources.issues.length,
+		},
+		history: historyCount(),
+	};
+}
+
+/** Print the startup banner into the transcript. */
+function printIntro(): void {
+	for (const line of renderIntro(introState())) addLine(line);
+}
+
+
 let exiting = false;
 
 async function shutdown(): Promise<void> {
 	if (exiting) return;
 	exiting = true;
 	try {
-		await dbg.cleanup();
+		// Flush any pending session save so a clean quit never loses state.
+		try {
+			await flushSession();
+		} catch {
+			/* session flush is best-effort */
+		}
 	} finally {
+		await dbg.cleanup().catch(() => undefined);
 		tui.stop();
 		if (traceDap) {
 			const trace = dbg.dumpDapTrace();
@@ -206,9 +659,17 @@ const replCtx: ReplContext = {
 	io,
 	windows,
 	spinner,
-	config,
-	configSources,
+	// Getters (not snapshot values) so `reloadConfig` reassigning the module
+	// `config`/`configSources` is visible to every consumer on the next read —
+	// the settings view renders the fresh values after `/config reload`.
+	get config(): Config {
+		return config;
+	},
+	get configSources(): ConfigSources {
+		return configSources;
+	},
 	reloadConfig,
+	sessions: sessionsHooks,
 };
 
 async function submit(raw: string): Promise<void> {
@@ -328,8 +789,34 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 	return undefined;
 });
 
-transcript.addChild(new Text(colors.bold("aidb — GDB via DAP"), 1, 0));
-transcript.addChild(new Text(colors.muted("file <program> to load, break <file:line> to stop, run to start. /help for more."), 1, 0));
+// The startup banner (pi-style [tag] lines) is printed by
+// resolveStartupSession once it has decided whether to restore a session,
+// so the [session]/[target]/[layout] tags always reflect the live state.
 updateStatus();
 
 tui.start();
+
+// Startup sessions (pi-flag style): `--session <name>` opens that session,
+// `--resume` restores the most recently saved one. Runs after the screen is
+// up so the restore's transcript lines land on the visible pipe.
+async function resolveStartupSession(): Promise<void> {
+	const args = process.argv.slice(2);
+	const sessionIndex = args.indexOf("--session");
+	const resume = args.includes("--resume");
+	if (sessionIndex !== -1 && args[sessionIndex + 1]) {
+		const name = args[sessionIndex + 1]!;
+		const meta = store().sessions.list().find((s) => s.name === name);
+		if (meta) await restoreSession(name);
+		else replCtx.io.error(`--session: no saved session '${name}'. /open shows them.`);
+	} else if (resume) {
+		const list = store().sessions.list();
+		if (list.length === 0) {
+			replCtx.io.info("No saved sessions to resume. Set up a target and it will auto-save.");
+		} else {
+			// For now --resume restores the most recent saved session.
+			await restoreSession(list[list.length - 1]!.name);
+		}
+	}
+	printIntro();
+}
+	setTimeout(resolveStartupSession, 0);

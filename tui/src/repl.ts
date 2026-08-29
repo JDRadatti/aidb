@@ -13,6 +13,56 @@ import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
 import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
+import type { LayoutMeta, SessionMeta, TargetMeta } from "./session-store.ts";
+export type { LayoutMeta, SessionMeta, TargetMeta };
+
+/**
+ * Session persistence surface supplied by the host (main.ts). Undefined
+ * means sessions are disabled (no persisted dir / config knob turned off).
+ *
+ * The session model: `targets` (what you run), `layouts` (how
+ * it's shown), `sessions` (the named binding { target, layout, breakpoints }).
+ */
+export interface SessionHooks {
+	activeName(): string | null;
+	list(): SessionMeta[];
+	/** Debounced auto-save on any mutation. */
+	markDirty(): void;
+	/** Force an immediate save under `name` (default: current/active). */
+	save(name?: string): Promise<void>;
+	setCurrent(name: string): void;
+	remove(name: string): Promise<void>;
+	/** Start a fresh session under `name` (default: unnamed). */
+	startNew(name?: string): Promise<void>;
+	/** Restore a session (target ref + layout ref + breakpoints). */
+	restore(name: string): Promise<void>;
+	targets: TargetHooks;
+	layouts: LayoutHooks;
+}
+
+/** Named target profiles: the program/args/kind you run. */
+export interface TargetHooks {
+	/** Name of the active target profile (implied basename when unsaved). */
+	current(): string | null;
+	list(): TargetMeta[];
+	/** Persist the live gdb target as a profile under `name` (default: active). */
+	save(name?: string): Promise<void>;
+	/** Point gdb at a saved profile (symbols only; never auto-runs). */
+	load(name: string): Promise<void>;
+	remove(name: string): Promise<void>;
+}
+
+/** Named layout profiles: split-tree + watch panes. Explicit save only. */
+export interface LayoutHooks {
+	/** Name of the active layout profile, or null when none is saved. */
+	current(): string | null;
+	list(): LayoutMeta[];
+	/** Persist the current pane/watch layout as a profile (default: the active one). */
+	save(name?: string): Promise<void>;
+	/** Restore a layout profile (panes + watch entries). */
+	load(name: string): void | Promise<void>;
+	remove(name: string): Promise<void>;
+}
 
 export interface ReplIO {
 	line(text: string): void;
@@ -34,6 +84,7 @@ export interface ReplContext {
 	config: Config;
 	configSources: ConfigSources;
 	reloadConfig(): { config: Config; sources: ConfigSources };
+	sessions?: SessionHooks;
 }
 
 function withActivity<T>(ctx: ReplContext, label: string, operation: () => Promise<T>): Promise<T> {
@@ -141,6 +192,15 @@ function fillKeys(sheet: string, actions: Config["keybindings"]["actions"]): str
  */
 let lastLaunch: { program: string; args: string[] } | null = null;
 
+/** Read the current target, so the session snapshot can persist it. */
+export function getLastLaunch(): { program: string; args: string[] } | null {
+	return lastLaunch;
+}
+/** Set the current target (after `file`/`run`); used by session restore. */
+export function setLastLaunch(value: { program: string; args: string[] } | null): void {
+	lastLaunch = value ? { program: value.program, args: [...value.args] } : null;
+}
+
 /**
  * GDB inherits aidb's working directory, so a relative `./app` only resolves
  * if you started aidb from the right place. Resolve everything to an absolute
@@ -172,6 +232,8 @@ function cwdHint(io: ReplIO): void {
 function makeWatchView(ctx: ReplContext, id: string): WatchListView {
 	return new WatchListView(makeFetchCtx(ctx), { id, onChange: () => ctx.requestRender() });
 }
+/** Re-export so the host (main.ts) can re-mount watch panes on session restore. */
+export { makeWatchView };
 
 /** The first unused id in the series "watch", "watch2", "watch3", ... */
 export function nextWatchId(windows: WindowManager): string {
@@ -391,7 +453,8 @@ async function startTarget(program: string, args: string[], ctx: ReplContext): P
 		cwdHint(ctx.io);
 		return api;
 	}
-	lastLaunch = { program: absolute, args };
+	setLastLaunch({ program: absolute, args });
+	ctx.sessions?.markDirty();
 	if (api.breakpoints.size === 0) {
 		ctx.io.warning(`No breakpoints in ${absolute} — it will run straight through to exit.`);
 		ctx.io.info("Tip: break <file:line> first, then run again to inspect state.");

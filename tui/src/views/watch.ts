@@ -87,6 +87,24 @@ export class WatchListView extends View implements LivePane {
 		this.touch();
 	}
 
+	/**
+	 * Restore persisted entries on session resume. Snapshots are run-local
+	 * and start empty (pending); they re-fetch on the next stop.
+	 */
+	restore(entries: Array<{ expr: string; renderSpec: RenderSpec; byteCount: number }>): void {
+		for (const entry of entries) {
+			if (!entry.expr) continue;
+			this.entries.push({
+				expr: entry.expr,
+				renderSpec: entry.renderSpec,
+				byteCount: Math.max(requiredBytes(entry.renderSpec), 192),
+				pending: true,
+			});
+		}
+		this.setCursor(this.entries.length - 1);
+		this.touch();
+	}
+
 	/** Swap renderer/options; refetch only when the cached bytes are insufficient. */
 	setRenderSpec(index: number, spec: RenderSpec): boolean {
 		if (!INTERPRETERS[spec.rendererId]) return false;

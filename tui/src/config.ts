@@ -62,6 +62,8 @@ export interface SessionsConfig {
 	historyPath: string;
 	/** Directory future session snapshots (breakpoints/layout) will live in. */
 	sessionDir: string;
+	/** Disable auto-saving sessions on every change (default: on). */
+	autoSave: boolean;
 }
 
 export interface DefaultsConfig {
@@ -156,6 +158,7 @@ export const DEFAULT_CONFIG: Config = {
 	sessions: {
 		historyPath: path.join(HOME, ".aidb_history"),
 		sessionDir: path.join(HOME, ".config", "aidb", "sessions"),
+		autoSave: true,
 	},
 	windows: {},
 	agent: {},
@@ -222,6 +225,12 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 		issues.push({ path: p, message: `expected an array of strings, got ${JSON.stringify(v)}` });
 		return fallback;
 	};
+	const asBoolean = (v: unknown, p: string, fallback: boolean): boolean => {
+		if (v === undefined) return fallback;
+		if (typeof v === "boolean") return v;
+		issues.push({ path: p, message: `expected a boolean, got ${JSON.stringify(v)}` });
+		return fallback;
+	};
 	const gdb: GdbConfig = {
 		path: asString(isPlainObject(gdbRaw) ? gdbRaw.path : undefined, "gdb.path", DEFAULT_CONFIG.gdb.path),
 		args: asStringArray(isPlainObject(gdbRaw) ? gdbRaw.args : undefined, "gdb.args", []),
@@ -253,6 +262,11 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 			isPlainObject(sessionsRaw) ? sessionsRaw.sessionDir : undefined,
 			"sessions.sessionDir",
 			DEFAULT_CONFIG.sessions.sessionDir,
+		),
+		autoSave: asBoolean(
+			isPlainObject(sessionsRaw) ? sessionsRaw.autoSave : undefined,
+			"sessions.autoSave",
+			DEFAULT_CONFIG.sessions.autoSave,
 		),
 	};
 
