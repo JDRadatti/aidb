@@ -297,10 +297,18 @@ export class RegistersBinding implements Binding {
 /** Current source window around the debugger's tracked location. */
 export class SourceBinding implements Binding {
 	readonly kind = "source" as const;
-	readonly lineCount: number;
+	private lineCount: number;
 
 	constructor(lineCount = 24) {
 		this.lineCount = lineCount;
+	}
+
+	/** Adapt the fetched source window to the pane's viewport height. */
+	setViewportHeight(rows: number): boolean {
+		const next = Math.max(3, Math.floor(rows));
+		if (next === this.lineCount) return false;
+		this.lineCount = next;
+		return true;
 	}
 
 	identity(): string {
@@ -342,12 +350,20 @@ export class SourceBinding implements Binding {
 /** Disassembly window centered around the current program counter. */
 export class AssemblyBinding implements Binding {
 	readonly kind = "assembly" as const;
-	readonly instructionCount: number;
+	private instructionCount: number;
 	private readonly buffer: number;
 
 	constructor(instructionCount = 24, buffer = 10) {
 		this.instructionCount = instructionCount;
 		this.buffer = buffer;
+	}
+
+	/** Adapt the fetched instruction window to the pane's viewport height. */
+	setViewportHeight(rows: number): boolean {
+		const next = Math.max(3, Math.floor(rows));
+		if (next === this.instructionCount) return false;
+		this.instructionCount = next;
+		return true;
 	}
 
 	identity(): string {

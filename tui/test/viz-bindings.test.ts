@@ -274,6 +274,24 @@ describe("SourceBinding", () => {
 		assert.equal(snap.error, "no source location");
 	});
 
+	it("grows the fetched window to the pane's viewport height", async () => {
+		const binding = new SourceBinding();
+		assert.equal(binding.setViewportHeight(40), true);
+		assert.equal(binding.setViewportHeight(40), false);
+		assert.equal(binding.identity(), "source:40");
+		let request: { file: string; start: number; count: number } | undefined;
+		const snap = await binding.fetch(makeCtx({
+			getLocation: () => ({ file: "/tmp/example.c", line: 30 }),
+			readSource: async (file, start, count) => {
+				request = { file, start, count };
+				return Array.from({ length: count }, (_, i) => `line ${start + i}`);
+			},
+		}));
+
+		assert.deepEqual(request, { file: "/tmp/example.c", start: 11, count: 40 });
+		assert.equal(snap.lines?.length, 40);
+	});
+
 	it("falls back to assembly when source is unavailable", async () => {
 		const snap = await new SourceBinding(3).fetch(makeCtx({
 			getLocation: () => ({ file: "./stdio-common/printf.c", line: 32 }),
@@ -325,6 +343,23 @@ describe("AssemblyBinding", () => {
 
 		assert.deepEqual(snap.instructions?.map((instruction) => instruction.instruction), ["previous", "current", "next"]);
 		assert.equal(snap.instructions?.[1]?.current, true);
+	});
+
+	it("grows the instruction window to the pane's viewport height", async () => {
+		const binding = new AssemblyBinding();
+		assert.equal(binding.setViewportHeight(40), true);
+		assert.equal(binding.setViewportHeight(40), false);
+		assert.equal(binding.identity(), "asm:40");
+		const snap = await binding.fetch(makeCtx({
+			evaluateDetailed: async () => ({ result: "0x401126 <main+0>", variablesReference: 0, memoryReference: "0x401126" }),
+			disassemble: async (_reference, count) =>
+				Array.from({ length: count }, (_, index) => ({
+					address: `0x${(0x400000 + index).toString(16)}`,
+					instruction: index === 12 ? "push %rbp" : "nop",
+				})),
+		}));
+
+		assert.ok((snap.instructions?.length ?? 0) >= 40);
 	});
 });
 
