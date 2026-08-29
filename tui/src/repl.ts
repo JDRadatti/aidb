@@ -15,6 +15,9 @@ import type { ActivitySpinner } from "./spinner.ts";
 import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
 import type { LayoutMeta, SessionMeta, TargetMeta } from "./session-store.ts";
 export type { LayoutMeta, SessionMeta, TargetMeta };
+import { colors } from "./theme.ts";
+import { openPicker, type PickerItem, relativeTime } from "./picker.ts";
+import { renderSettings } from "./views/settings.ts";
 
 /**
  * Session persistence surface supplied by the host (main.ts). Undefined
@@ -93,8 +96,9 @@ function withActivity<T>(ctx: ReplContext, label: string, operation: () => Promi
 
 const HELP = [
 	"aidb — GDB-style commands (no slash needed):",
-	"  file <program>              load a program's symbols; then `run` starts it",
-	"  run [program] [args...]     start or restart the target (remembers the last one)",
+	"  run <program> [args...]    the one start verb: loads + runs the program",
+	"  run                        restart the last program (remembers its args)",
+	"  attach <pid>                attach to an already-running process",
 	"  break <loc> [cond]          set a breakpoint; <loc> is file:line, a line number,",
 	"                              or a function name (alias: b)",
 	"  info breakpoints            list breakpoints (alias: i b)",
@@ -113,13 +117,23 @@ const HELP = [
 	"  /watch <expr>               pin an expression to a live watch pane across stops",
 	"  /win load <pane> <spec>     bind a live visualizer: regs · mem <expr> [bytes] · plot n · tree s · source · asm",
 	"",
-	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | next | list;",
-	"  /win pick [idx] [view] swaps how a live pane renders; /switch <idx|name> focuses a pane.",
+	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | swap <a> [b] | next | list;",
+	"  /win pick [idx] [view] swaps how a live pane renders; /win switch <idx|name> focuses a pane.",
 	"",
 	"Anything else is passed to GDB verbatim: info registers, x/4xw, disassemble, pwd, ...",
 	"Relative paths resolve against the directory aidb was started in; Tab completes file paths.",
 	"",
-	"Slash aliases still work: /launch /attach /break /breaks /remove /stack /locals /status /help /quit",
+	"Saved things — one grammar for all three:",
+	"  /session /target /layout (bare)   open a fuzzy picker: pick one to open; type a",
+	"                                    new name + Enter to save the current state;",
+	"                                    ctrl+d delete · ctrl+r rename.",
+	"  /session <name> /target <name> /layout <name>   act on that one directly.",
+	"  /open (Alt-O) · `>`               one combined finder over sessions · layouts · targets.",
+	"  /settings                         effective config (theme, gdb, keys, sessions).",
+	"  /config reload                    re-read ~/.aidbrc + ./.aidb.json.",
+	"  terminology: a session = one debugging goal { target + layout + breakpoints };",
+	"  targets/layouts are shared profiles; everything saved lives on disk.",
+	"  slash commands: /help · /open · /settings · /session · /target · /layout · /win · /config · /watch · /new · /quit",
 	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Topic help: help <topic> (e.g. help win).",
 	"Scroll: Ctrl+Up/Ctrl+Down (or PgUp/PgDn) scroll the active pane; Home/End",
 ].join("\n");
@@ -281,7 +295,7 @@ export function resetLivePanes(ctx: ReplContext): void {
 }
 
 /** `/win load` mini-syntax → a binding paired with its default interpreter. */
-export function parseLoadSpec(spec: string): { binding: Binding; interpreterId: string } | undefined {
+export function parseLoadSpec(spec: string, ctx?: ReplContext): { binding: Binding; interpreterId: string } | undefined {
 	const match = /^(\S+)(?:\s+(.+))?$/.exec(spec.trim());
 	if (!match) return undefined;
 	const keyword = match[1];
@@ -465,29 +479,13 @@ async function startTarget(program: string, args: string[], ctx: ReplContext): P
 }
 
 /**
- * gdb-style `file <program>`: load symbols now so breakpoints bind
- * immediately, and remember the program so bare `run` can start it.
+ * gdb-style `file <program>`: kept as a hidden alias for the one start verb
+ * `run` (GDB muscle memory); completion never suggests it. `file` alone
+ * restarts the last program like bare `run`.
  */
 
-async function handleFile(program: string, ctx: ReplContext): Promise<void> {
-	const { getApi, io } = ctx;
-	const api = getApi();
-	if (!program) {
-		io.info(lastLaunch ? `Current target: ${lastLaunch.program}` : "No target file. Usage: file <program>");
-		return;
-	}
-	if (runningBlocked(api, io)) return;
-	const absolute = resolveProgram(program);
-	io.info(`Reading symbols from ${absolute}...`);
-	try {
-		await withActivity(ctx, "loading symbols", () => api.evaluate(`file ${absolute}`, "repl"));
-	} catch (error) {
-		io.error(error instanceof Error ? error.message : String(error));
-		cwdHint(io);
-		return;
-	}
-	lastLaunch = { program: absolute, args: lastLaunch?.program === absolute ? lastLaunch.args : [] };
-	io.success(`Symbols loaded. Set breakpoints, then type run.`);
+async function handleFile(args: string, ctx: ReplContext): Promise<void> {
+	await handleRun(args, ctx);
 }
 
 async function handleRun(args: string, ctx: ReplContext): Promise<void> {
@@ -789,6 +787,37 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			io.info(`Active pane: ${windows.cycle()}`);
 			return;
 		}
+		case "switch": {
+			const ref = rest[0];
+			if (ref === undefined) {
+				openPanePicker(ctx);
+				return;
+			}
+			if (rest.length > 1) {
+				io.error("Usage: /win switch <idx|name> — /win list shows indices");
+				return;
+			}
+			if (!windows.switchTo(ref)) {
+				io.error(/^\d+$/.test(ref) ? `No pane at index ${ref}. /win list shows indices.` : `No pane named '${ref}'.`);
+				return;
+			}
+			io.info(`Active pane: ${windows.active}`);
+			return;
+		}
+		case "swap": {
+			if (rest.length === 0 || rest.length > 2) {
+				io.error("Usage: /win swap <idx|name> [idx|name] — one ref swaps the active pane");
+				return;
+			}
+			const result = windows.swap(rest[0]!, rest[1]);
+			if (!result.ok) {
+				io.error(result.error);
+				return;
+			}
+			const other = rest[1] === undefined ? windows.active : rest[1]!;
+			io.success(`'${rest[0]}' and '${other}' exchanged places — active: ${windows.active}`);
+			return;
+		}
 		case "list": {
 			for (const pane of windows.list()) {
 				io.line(`${pane.idx}\t${pane.id}${pane.active ? " *" : ""}`);
@@ -819,7 +848,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 				io.success(`Bound '${target}' to a live watch pane. /watch <expr> adds expressions.`);
 				return;
 			}
-			const parsed = parseLoadSpec(specWords.join(" "));
+			const parsed = parseLoadSpec(specWords.join(" "), ctx);
 			if (!parsed) {
 				io.error("Cannot visualize " + JSON.stringify(specWords.join(" ")) + `. Try: watch · regs · mem <expr> · plot <expr> · tree <expr> · source · asm`);
 				return;
@@ -994,6 +1023,56 @@ async function handleWatch(args: string, ctx: ReplContext): Promise<void> {
 	io.success(`Watching ${sub}.`);
 }
 
+/**
+ * `/session` — the flattened collection grammar:
+ *   `/session` (bare)      → fuzzy finder over saved sessions
+ *   `/session <name>`      → restore that saved session directly
+ *   `/session save [<name>]` → persist the current state now
+ * The finder adds `+ create` (saves current state under the typed name,
+ * Enter), ctrl+d (delete, inline confirm) and ctrl+r (rename).
+ */
+async function handleSession(args: string, ctx: ReplContext): Promise<void> {
+	const hooks = ctx.sessions;
+	const io = ctx.io;
+	if (!hooks) {
+		io.error("Sessions are not enabled in this build.");
+		return;
+	}
+	const [verb, ...rest] = args.split(/\s+/).filter(Boolean);
+	const name = rest.join(" ").trim();
+
+	if (!verb) {
+		openSessionPicker(ctx);
+		return;
+	}
+
+	if (verb === "save") {
+		try {
+			await hooks.save(name || undefined);
+		} catch (error) {
+			io.error(error instanceof Error ? error.message : String(error));
+		}
+		return;
+	}
+
+	// `switch` is tolerated as an invisible alias (`/session switch <name>`).
+	if (verb === "switch") {
+		if (!name) {
+			openSessionPicker(ctx);
+			return;
+		}
+		await hooks.restore(name);
+		return;
+	}
+
+	// Anything else is a saved session name to restore directly.
+	try {
+		await hooks.restore(verb);
+	} catch (error) {
+		io.error(error instanceof Error ? error.message : String(error));
+	}
+}
+
 /** Parse an entry index; omitted → undefined (caller applies a default). */
 function resolveIndex(raw: string | undefined): number | undefined {
 	if (raw === undefined) return undefined;
@@ -1011,6 +1090,378 @@ function entrySummary(view: WatchListView, index: number): string {
 }
 
 
+/**
+ * `/new [name]` — a genuinely fresh session. Resets the live gdb (new
+ * process, no breakpoints), drops the target, and collapses the layout back
+ * to the bare repl pane, then starts a (optionally named) session. This is
+ * the material implementation; `/session new`, `/target new` and `/layout new`
+ * all delegate here.
+ */
+async function handleNew(ctx: ReplContext, name?: string): Promise<void> {
+	const hooks = ctx.sessions;
+	if (!hooks) {
+		// Sessions off: still reset the live debugger + layout in place.
+		await ctx.reset();
+		setLastLaunch(null);
+		ctx.io.success("Fresh target — break a line, then run.");
+		return;
+	}
+	await hooks.startNew(name?.trim() || undefined);
+}
+
+/* ------------------------------------------------------- fuzzy pickers ---- */
+
+/**
+ * A "named collection" the generic picker operates on (sessions, targets,
+ * layouts). For every collection the grammar is identical:
+ *   bare command → finder (pick to open, type a new name + Enter to save
+ *   current, ctrl+d to delete, ctrl+r to rename).
+ */
+interface CollectionSpec {
+	/** Canonical command used in echoes, e.g. "/session". */
+	command: string;
+	/** Overlay title, e.g. "sessions". */
+	title: string;
+	/** Noun for the create/save row, e.g. "session". */
+	term: string;
+	items(ctx: ReplContext): PickerItem[];
+	/** Whether the picker should offer a "save current" row. */
+	canCreate?(ctx: ReplContext): boolean;
+	onPick(ctx: ReplContext, name: string): Promise<void> | void;
+	/** Persist the current state under `name` (the picker's Enter-on-new). */
+	onCreate(ctx: ReplContext, name: string): Promise<void> | void;
+	onDelete(ctx: ReplContext, name: string): Promise<void> | void;
+	onRename?(ctx: ReplContext, oldName: string, newName: string): Promise<void> | void;
+}
+
+const SESSIONS_SPEC: CollectionSpec = {
+	command: "/session",
+	title: "sessions",
+	term: "session",
+	items: (ctx) => {
+		const hooks = ctx.sessions!;
+		const current = hooks.activeName();
+		return hooks.list().map((s) => ({
+			value: s.name,
+			label: `${s.name}${current === s.name ? " ✳" : ""}`,
+			description: `${s.target ?? "no target"} · ${s.layout ?? "no layout"} · bp ${s.breakpoints} · ${relativeTime(s.savedAt ?? Date.now())}`,
+		}));
+	},
+	onPick: (ctx, name) => ctx.sessions!.restore(name),
+	// Enter on a fresh name saves the CURRENT state (not a blank session).
+	onCreate: (ctx, name) => ctx.sessions!.save(name),
+	onDelete: (ctx, name) => ctx.sessions!.remove(name),
+	onRename: async (ctx, oldName, newName) => {
+		await ctx.sessions!.save(newName);
+		if (oldName && oldName !== newName) await ctx.sessions!.remove(oldName);
+	},
+};
+
+const TARGETS_SPEC: CollectionSpec = {
+	command: "/target",
+	title: "targets",
+	term: "target",
+	items: (ctx) => {
+		const hooks = ctx.sessions!;
+		const current = hooks.targets.current();
+		return hooks.targets.list().map((t) => ({
+			value: t.name,
+			label: `${t.name}${current === t.name ? " ✳" : ""}`,
+			description: `${t.kind === "launch" ? (t.program ?? "?") : `attach pid ${t.pid}`}${t.args.length ? ` ${t.args.join(" ")}` : ""}`,
+		}));
+	},
+	// Naming a profile needs a live target to snapshot.
+	canCreate: () => getLastLaunch() !== null,
+	onPick: (ctx, name) => {
+		ctx.sessions!.targets.load(name);
+		ctx.sessions!.markDirty();
+	},
+	onCreate: (ctx, name) => {
+		ctx.sessions!.targets.save(name);
+		ctx.sessions!.markDirty();
+	},
+	onDelete: (ctx, name) => {
+		ctx.sessions!.targets.remove(name);
+		ctx.sessions!.markDirty();
+	},
+	onRename: (ctx, oldName, newName) => ctx.sessions!.targets.save(newName),
+};
+
+function hooks(ctx: ReplContext): NonNullable<ReplContext["sessions"]> {
+	return ctx.sessions!;
+}
+
+/**
+ * Open the fuzzy picker for a named collection: pick an item to open, type a
+ * fresh name + Enter to save current, ctrl+d to delete, ctrl+r to rename.
+ */
+function openCollectionPicker(spec: CollectionSpec, ctx: ReplContext, itemEcho = (n: string) => `${spec.command} ${n}`): void {
+	const hooksApi = ctx.sessions;
+	if (!hooksApi) {
+		ctx.io.error("Sessions are not enabled in this build.");
+		return;
+	}
+	const items = spec.items(ctx);
+	const canCreate = spec.canCreate?.(ctx) ?? true;
+
+	if (items.length === 0 && !canCreate) {
+		items.push({ value: "", label: `no saved ${spec.term}s`, description: "set one up in the transcript, then reopen this picker" });
+	}
+	openPicker({
+		title: spec.title,
+		items,
+		...(canCreate
+			? {
+					createLabel: (query: string) => `save current ${spec.term} "${query}"`,
+					onCreate: (query: string) => {
+						ctx.io.line(`${colors.accent("› ")}${spec.command} save ${query}`);
+						void spec.onCreate(ctx, query);
+					},
+				}
+			: {}),
+		onPick: (item) => {
+			if (!item.value) return;
+			ctx.io.line(`${colors.accent("› ")}${itemEcho(item.value)}`);
+			void spec.onPick(ctx, item.value);
+		},
+		onDelete: (item) => {
+			if (!item.value) return;
+			ctx.io.line(`${colors.accent("› ")}${spec.command} delete ${item.value}`);
+			void spec.onDelete(ctx, item.value);
+		},
+		onRename: (item, newName) => {
+			if (!item.value || !newName) return;
+			ctx.io.line(`${colors.accent("› ")}${spec.command} save ${newName}`);
+			void spec.onRename?.(ctx, item.value, newName);
+		},
+		onCancel: () => undefined,
+	});
+}
+
+/** `› /session <name>` echo; used by bare `/session`. */
+export function openSessionPicker(ctx: ReplContext): void {
+	openCollectionPicker(SESSIONS_SPEC, ctx);
+}
+
+/** `› /target <name>` echo; used by bare `/target`. */
+function openTargetPicker(ctx: ReplContext): void {
+	openCollectionPicker(TARGETS_SPEC, ctx);
+}
+
+const LAYOUTS_SPEC: CollectionSpec = {
+	command: "/layout",
+	title: "layouts",
+	term: "layout",
+	items: (ctx) => {
+		const hooksApi = ctx.sessions!;
+		const current = hooksApi.layouts.current();
+		return hooksApi.layouts.list().map((l) => ({
+			value: l.name,
+			label: `${l.name}${current === l.name ? " ✳" : ""}`,
+			description: `${l.panes} pane(s) · ${l.watchEntries} watch`,
+		}));
+	},
+	onPick: (ctx, name) => {
+		ctx.sessions!.layouts.load(name);
+		ctx.sessions!.markDirty();
+	},
+	onCreate: (ctx, name) => {
+		ctx.sessions!.layouts.save(name);
+		ctx.sessions!.markDirty();
+	},
+	onDelete: (ctx, name) => {
+		ctx.sessions!.layouts.remove(name);
+		ctx.sessions!.markDirty();
+	},
+	onRename: (ctx, oldName, newName) => {
+		ctx.sessions!.layouts.save(newName);
+		if (oldName && oldName !== newName) ctx.sessions!.layouts.remove(oldName);
+	},
+};
+
+/** `› /layout <name>` echo; used by bare `/layout`. */
+function openLayoutPicker(ctx: ReplContext): void {
+	openCollectionPicker(LAYOUTS_SPEC, ctx);
+}
+
+/** `› /win switch <pane>` on pick; used by bare `/win switch`. */
+function openPanePicker(ctx: ReplContext): void {
+	const items: PickerItem[] = ctx.windows.list().map((p) => ({
+		value: p.id,
+		label: `${p.idx} · ${p.id}${p.active ? " ✳" : ""}`,
+		description: p.title,
+	}));
+	openPicker({
+		title: "switch pane",
+		items,
+		onPick: (item) => {
+			if (!item.value) return;
+			ctx.io.line(`${colors.accent("› ")}/win switch ${item.value}`);
+			ctx.windows.switchTo(item.value);
+		},
+		onCancel: () => undefined,
+	});
+}
+
+/**
+ * `/open` — one combined finder over sessions · layouts · targets. A single
+ * fuzzy pass across all three saved collections; Enter opens the right one.
+ * Items are tagged with their group in the label so typing a kind still
+ * narrows (`/open se`, `/open mem`).
+ *
+ * Also the destination of a leading `>` on the prompt — main.ts opens it
+ * live on the first keystroke; a pasted/recalled `> <query>` line arrives
+ * through handleReplInput with `seed` = whatever follows the `>`.
+ */
+type OpenItem = PickerItem & { open(ctx: ReplContext): Promise<void> | void };
+
+export async function handleOpen(ctx: ReplContext, seed?: string): Promise<void> {
+	const h = ctx.sessions;
+	if (!h) {
+		ctx.io.error("Sessions are not enabled in this build.");
+		return;
+	}
+	const items: OpenItem[] = [
+		...SESSIONS_SPEC.items(ctx).map((s) => ({
+			...s,
+			label: `${colors.muted("session")}  ${s.label}`,
+			open: () => h.restore(s.value),
+		})),
+		...LAYOUTS_SPEC.items(ctx).map((l) => ({
+			...l,
+			label: `${colors.muted("layout")}   ${l.label}`,
+			open: () => {
+				h.layouts.load(l.value);
+				h.markDirty();
+			},
+		})),
+		...TARGETS_SPEC.items(ctx).map((t) => ({
+			...t,
+			label: `${colors.muted("target")}   ${t.label}`,
+			open: () => {
+				h.targets.load(t.value);
+				h.markDirty();
+			},
+		})),
+	];
+	if (items.length === 0) {
+		ctx.io.info("Nothing saved yet. run <program> to start, then /session save <name>.");
+		return;
+	}
+	openPicker({
+		title: "open — sessions · layouts · targets",
+		items,
+		...(seed ? { initialFilter: seed } : {}),
+		onPick: (item) => {
+			// The picker hands back row copies ({value,label,description}) — the
+			// `open` callback lives on the original item, so re-find it here.
+			const openItem = items.find((i) => i.value === item.value);
+			if (!openItem) return;
+			ctx.io.line(`${colors.accent("› ")}/open ${item.value}`);
+			void openItem.open(ctx);
+		},
+		onCancel: () => undefined,
+	});
+}
+
+/**
+ * Slash commands that open the fuzzy picker when they carry no argument.
+ * main.ts defers the transcript echo for these — the picker echoes the
+ * resolved line itself on pick.
+ */
+export function isBarePickerCommand(input: string): boolean {
+	const text = input.trim();
+	return (
+		text === "/win switch" ||
+		text === "/session" ||
+		text === "/target" ||
+		text === "/layout" ||
+		text === "/open"
+	);
+}
+
+/**
+ * `/target` — the flattened collection grammar for stored target profiles.
+ *   `/target` (bare)      → fuzzy finder over saved profiles
+ *   `/target <name>`      → load that saved profile (symbols; never auto-runs)
+ *   `/target save <name>` → persist the live target as a profile
+ * The finder adds `+ save current` (Enter on a fresh name), ctrl+d delete,
+ * ctrl+r rename. Stored profiles are seeded by `run <program> [args…]`.
+ */
+async function handleTarget(args: string, ctx: ReplContext): Promise<void> {
+	const hooks = ctx.sessions;
+	const io = ctx.io;
+	if (!hooks) {
+		io.error("Sessions are not enabled — /target needs the persistence store.");
+		return;
+	}
+	const [verb, ...rest] = args.split(/\s+/).filter(Boolean);
+	const name = rest.join(" ").trim();
+
+	if (!verb) {
+		openTargetPicker(ctx);
+		return;
+	}
+
+	if (verb === "save") {
+		if (!name) {
+			io.error("Usage: /target save <name>");
+			return;
+		}
+		await hooks.targets.save(name);
+		io.success(`Target profile '${name}' saved.`);
+		hooks.markDirty();
+		return;
+	}
+
+	// Anything else is a saved profile name to load directly.
+	await hooks.targets.load(verb === "switch" ? name || "" : verb);
+	hooks.markDirty();
+}
+
+/**
+ * `/layout` — the flattened collection grammar for stored layout profiles.
+ *   `/layout` (bare)      → fuzzy finder over saved layouts
+ *   `/layout <name>`      → apply that saved layout
+ *   `/layout save <name>` → persist the current panes/watch as a profile
+ * The finder adds `+ save current` (Enter on a fresh name), ctrl+d delete,
+ * ctrl+r rename.
+ */
+async function handleLayout(args: string, ctx: ReplContext): Promise<void> {
+	const hooks = ctx.sessions;
+	const io = ctx.io;
+	if (!hooks) {
+		io.error("Sessions are not enabled — /layout needs the persistence store.");
+		return;
+	}
+	const [verb, ...rest] = args.split(/\s+/).filter(Boolean);
+	const name = rest.join(" ").trim();
+
+	if (!verb) {
+		openLayoutPicker(ctx);
+		return;
+	}
+
+	if (verb === "save") {
+		const active = hooks.layouts.current();
+		const target = name || active || "";
+		if (!target) {
+			io.error("No active layout profile — /layout save <name>");
+			return;
+		}
+		await hooks.layouts.save(target);
+		io.success(`Layout '${target}' saved.`);
+		hooks.markDirty();
+		return;
+	}
+
+	// Anything else is a saved layout name to apply directly.
+	await hooks.layouts.load(verb === "switch" ? name || "" : verb);
+	hooks.markDirty();
+}
+
+
+
 async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void> {
 	const words = input.slice(1).split(/\s+/);
 	const command = words[0] ?? "";
@@ -1025,18 +1476,10 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			break;
 
 		case "run":
+		case "launch":
+			// `run` is the one start verb; `launch` is an invisible alias.
 			await handleRun(args, ctx);
 			break;
-
-		case "launch": {
-			const program = rest[0];
-			if (!program) {
-				io.error("Usage: /launch <program> [args...]");
-				return;
-			}
-			api = await startTarget(program, rest.slice(1), ctx);
-			break;
-		}
 
 		case "attach": {
 			const pid = Number.parseInt(rest[0] ?? "", 10);
@@ -1111,6 +1554,31 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 			await handleWatch(args, ctx);
 			break;
 
+		case "session":
+			await handleSession(args, ctx);
+			break;
+
+		case "open":
+			handleOpen(ctx);
+			break;
+
+		case "settings": {
+			for (const line of renderSettings(ctx.config, ctx.configSources)) io.line(line);
+			break;
+		}
+
+		case "new":
+			await handleNew(ctx, args || undefined);
+			break;
+
+		case "target":
+			await handleTarget(args, ctx);
+			break;
+
+		case "layout":
+			await handleLayout(args, ctx);
+			break;
+
 		case "quit":
 			io.info("Shutting down...");
 			ctx.requestExit();
@@ -1154,6 +1622,12 @@ export async function handleReplInput(rawInput: string, ctx: ReplContext): Promi
 	try {
 		if (input.startsWith("/")) {
 			await handleSlashCommand(input, ctx);
+		} else if (input.startsWith(">")) {
+			// Leading `>` opens the combined fuzzy finder. main.ts catches a
+			// freshly-typed `>` on an empty prompt live; a pasted/recalled
+			// `> mem` line lands here, opening the finder pre-narrowed to
+			// whatever follows the `>` instead of reaching gdb as a command.
+			await handleOpen(ctx, input.slice(1).trim() || undefined);
 		} else {
 			await handleGdbCommand(input, ctx);
 		}

@@ -317,7 +317,7 @@ describe("/win load and /win pick", () => {
 		await handleReplInput("/win vsplit live", ctx);
 		messages.length = 0;
 		await handleReplInput("/win load live wat", ctx);
-		assert.match(lastMessage(messages), /Cannot visualize 'wat'/);
+		assert.match(lastMessage(messages), /Cannot visualize "wat"/);
 		assert.equal(ctx.windows.component("live"), undefined);
 	});
 

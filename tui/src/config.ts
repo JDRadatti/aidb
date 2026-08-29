@@ -92,6 +92,7 @@ export const ACTIONS = [
 	"stepOut",
 	"scrollUp",
 	"scrollDown",
+	"open",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -123,6 +124,7 @@ export const DEFAULT_ACTIONS: Record<Action, KeyId[]> = {
 	stepOut: ["shift+f11"],
 	scrollUp: ["ctrl+up", "pageUp"],
 	scrollDown: ["ctrl+down", "pageDown"],
+	open: ["alt+o"],
 };
 
 export const DEFAULT_EDITOR_BINDINGS: Record<string, KeyId[]> = {

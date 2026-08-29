@@ -10,7 +10,7 @@ import {
 	TuiMainScreen,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { AidbEditor, attachDropdownOverlay } from "../src/completion-overlay.ts";
+import { AidbEditor, attachDropdownOverlay, type OverlayLineSource } from "../src/completion-overlay.ts";
 import { createEditorTheme } from "../src/theme.ts";
 
 const WIDTH = 100;
@@ -144,6 +144,42 @@ describe("AidbEditor", () => {
 		assert.ok(aidb.isShowingAutocomplete() === false, "dropdown closed");
 	});
 
+	it("does not re-submit the fuzzy-picker prompt after a bare picker command submits", async () => {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme());
+
+		const submitted: string[] = [];
+		aidb.onSubmit = (text) => {
+			submitted.push(text);
+			// Mimic main.ts submit(): a bare picker command opens the fuzzy
+			// finder, which synchronously rewrites the prompt to `> `.
+			if (text === "/session") aidb.setText("> ");
+		};
+
+		aidb.setAutocompleteProvider({
+			getSuggestions: () =>
+				Promise.resolve({
+					items: [{ value: "session", label: "session" }],
+					prefix: "/",
+				}),
+			applyCompletion: (lines: string[], cursorLine: number, cursorCol: number) => ({
+				lines,
+				cursorLine,
+				cursorCol,
+			}),
+		});
+
+		for (const ch of "/session") aidb.handleInput(ch);
+		await settle();
+		assert.ok(aidb.isShowingAutocomplete(), "slash dropdown is showing while typing");
+
+		aidb.handleInput("\r"); // one Enter: submit /session, picker takes over the prompt
+		await settle();
+
+		assert.deepEqual(submitted, ["/session"], "the `> ` prompt must not be submitted as a command");
+		assert.equal(aidb.getText(), "> ", "the picker prompt text survives (visually only)");
+	});
+
 	it("returns to stock output once the dropdown closes", async () => {
 		const { tui } = stubTui();
 		const aidb = new AidbEditor(tui, createEditorTheme());
@@ -207,7 +243,37 @@ describe("attachDropdownOverlay", () => {
 		entry.component.render(WIDTH);
 		assert.equal(entry.options.offsetY, -editor.lastHeight);
 	});
+
+	it("composites a custom source (e.g. the fuzzy picker) with the dropdown's geometry", async () => {
+		const { tui, entries } = stubTui();
+		const editor = new AidbEditor(tui, createEditorTheme());
+		const rowsBelow = 4;
+		const sources: OverlayLineSource[] = [];
+		attachDropdownOverlay(tui, editor, { rowsBelow: () => rowsBelow, sources });
+		const entry = entries[0];
+
+		await activateAndRender(editor, { tui }); // editor dropdown is now active
+		assert.ok(entry.component.render(WIDTH).length > 0, "editor dropdown shows when no custom source fires");
+
+		// Register the picker source; it wins over the editor's own dropdown and
+		// renders through the SAME overlay entry + live offsetY.
+		let pickerOpen = true;
+		sources.push((width) => (pickerOpen ? pickerBand(width) : null));
+		const band = entry.component.render(WIDTH);
+		assert.deepEqual(band, pickerBand(WIDTH), "custom source composites in place of the dropdown");
+		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight), "geometry is the dropdown's own");
+
+		// Spent (picker closed): falls back to the editor's dropdown.
+		pickerOpen = false;
+		assert.deepEqual(entry.component.render(WIDTH), [...editor.dropdownLines!]);
+	});
 });
+
+/** Stands in for `pickerLineSource`'s output during the overlay unit test. */
+function pickerBand(width: number): string[] {
+	const item = "→ session ✳  game · code-watch · bp 3 · now";
+	return [item.slice(0, Math.max(1, width)), "↑/↓ move · Enter select · Esc cancel"];
+}
 
 describe("TuiMainScreen integration", () => {
 	/** Full-render line count of the last frame appended to `writes`. */

@@ -46,14 +46,14 @@ const lastMessage = (messages: ReturnType<typeof makeContext>["messages"]): stri
 	messages.at(-1)!.text;
 
 describe("window commands", () => {
-	it("/switch moves the active pane and rejects bad indices", async () => {
+	it("/win switch moves the active pane and rejects bad indices", async () => {
 		const { ctx, windows, messages } = makeContext();
 		await handleReplInput("/win vsplit", ctx);
-		await handleReplInput("/switch 0", ctx);
+		await handleReplInput("/win switch 0", ctx);
 		assert.equal(windows.active, "repl");
-		await handleReplInput("/switch 1", ctx);
+		await handleReplInput("/win switch 1", ctx);
 		assert.equal(windows.active, "pane2");
-		await handleReplInput("/switch 5", ctx);
+		await handleReplInput("/win switch 5", ctx);
 		assert.match(lastMessage(messages), /No pane at index 5/);
 	});
 
@@ -91,13 +91,13 @@ describe("window commands", () => {
 		assert.equal(windows.active, "repl");
 	});
 
-	it("/win splits can name panes; /switch resolves names", async () => {
+	it("/win splits can name panes; /win switch resolves names", async () => {
 		const { ctx, windows, messages } = makeContext();
 		await handleReplInput("/win vsplit mem", ctx);
 		assert.deepEqual(windows.list().map((p) => p.id), ["repl", "mem"]);
-		await handleReplInput("/switch mem", ctx);
+		await handleReplInput("/win switch mem", ctx);
 		assert.equal(windows.active, "mem");
-		await handleReplInput("/switch nope", ctx);
+		await handleReplInput("/win switch nope", ctx);
 		assert.match(lastMessage(messages), /No pane named 'nope'/);
 	});
 

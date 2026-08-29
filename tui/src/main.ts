@@ -29,12 +29,15 @@ import {
 	getLastLaunch,
 	setLastLaunch,
 	makeWatchView,
+	isBarePickerCommand,
+	handleOpen,
 	type ReplContext,
 	type ReplIO,
 	type SessionHooks,
 } from "./repl.ts";
 import { AidbCompletionProvider, buildCommandRegistry } from "./slash.ts";
 import { renderIntro, type IntroState } from "./intro.ts";
+import { installPickerHost, pickerActive, pickerLineSource } from "./picker.ts";
 import { SplitTree } from "./split-tree.ts";
 import { View } from "./view.ts";
 import { WindowManager } from "./window-manager.ts";
@@ -680,8 +683,18 @@ async function submit(raw: string): Promise<void> {
 		return;
 	}
 	editor.addToHistory(text);
-	addLine(colors.accent("› ") + text);
 	persistHistory(text);
+	if (isBarePickerCommand(text) || text.startsWith(">")) {
+		// The fuzzy picker echoes the resolved command itself on pick
+		// (`› /open <name>` and the noun echoes) and nothing on cancel.
+		// Leading `>` is the same finder (a pasted/recalled line) — same
+		// deferral so picking echoes once, cancelling echoes nothing.
+		// main.ts's listener handles the freshly-typed `>` live instead.
+		await handleReplInput(text, replCtx);
+		updateStatus();
+		return;
+	}
+	addLine(colors.accent("› ") + text);
 	await handleReplInput(text, replCtx);
 	updateStatus();
 }
@@ -703,7 +716,23 @@ editor.setAutocompleteProvider(new AidbCompletionProvider(buildCommandRegistry()
 editor.onSubmit = (text: string) => {
 	void submit(text);
 };
-attachDropdownOverlay(tui, editor, { maxHeight: "80%" });
+// The single prompt-band overlay. The slash dropdown renders through it on its
+// own; the fuzzy picker registers as an extra source so it draws through the
+// SAME full-width, chrome-less band with identical geometry (live `offsetY`).
+attachDropdownOverlay(tui, editor, {
+	maxHeight: "80%",
+	sources: [pickerLineSource],
+});
+
+// The fuzzy picker needs the TUI surface (key capture + a repaint trigger);
+// its lines flow through the prompt-band overlay via pickerLineSource.
+installPickerHost({
+	addInputListener: (listener) => tui.addInputListener(listener),
+	requestRender: () => tui.requestRender(),
+	// The finder's query lives in the real prompt as `> <query>`, like cursor's
+	// fuzzy finder; the editor keeps the block cursor at the end of the text.
+	setPromptText: (text) => editor.setText(text),
+});
 
 // Seed this session's history from the persisted file (most-recent-first).
 (function seedHistory(): void {
@@ -733,6 +762,7 @@ const actionHandlers: Record<Action, (data: string) => void> = {
 	stepOut: () => guard((api) => spinner.run("stepping out", () => api.stepOut())),
 	scrollUp: (data) => scrollActivePane(data),
 	scrollDown: (data) => scrollActivePane(data),
+	open: () => void handleOpen(replCtx),
 };
 
 function guard(run: (api: DebuggerAPI) => Promise<unknown>): void {
@@ -761,6 +791,21 @@ function actionFor(data: string): Action | null {
 }
 
 tui.addInputListener((data): { consume: boolean } | undefined => {
+	// While the fuzzy picker is open, every key belongs to it (its own
+	// listener consumes them; we must not act on them here — including
+	// Ctrl+C, which the picker treats as cancel).
+	if (pickerActive()) return undefined;
+
+	// `>` on an empty prompt opens the combined fuzzy finder (sessions ·
+	// layouts · targets). Consumed so the raw `>` never lands in the editor
+	// buffer or history; the picker draws its own `> ` prompt, so the one
+	// you typed appears to "stick" seamlessly. Paste/recall of a whole
+	// `> <query>` line is routed in repl.ts's handleReplInput instead.
+	if (data === ">" && !editor.getText()) {
+		void handleOpen(replCtx);
+		return { consume: true };
+	}
+
 	// Hard binding: cannot be remapped (interrupts takes priority).
 	if (matchesKey(data, "ctrl+c")) {
 		if (editor.getText()) {

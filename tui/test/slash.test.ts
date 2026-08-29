@@ -86,30 +86,40 @@ describe("AidbCompletionProvider slash arguments", () => {
 	});
 
 	it("fuzzy-matches a pane by name (qq → qq-target)", async () => {
-		const s = await suggest(p, "/switch qq", 10);
+		const s = await suggest(p, "/win switch qq", 14);
 		assert.ok(s);
 		assert.ok(s!.values.includes("qq-target"));
 	});
 
-	it("completes /remove from live breakpoints", async () => {
-		const s = await suggest(p, "/remove ", 9);
-		assert.ok(s);
-		assert.deepEqual(s!.values, ["1", "2"]);
+	it("completes /win swap panes for both arguments", async () => {
+		const first = await suggest(p, "/win swap qq", 12);
+		assert.ok(first);
+		assert.ok(first!.values.includes("qq-target"));
+
+		const second = await suggest(p, "/win swap repl ", 15);
+		assert.ok(second);
+		assert.ok(second!.values.includes("mem"));
 	});
 
-	it("completes /launch from the current directory", async () => {
-		const s = await suggest(p, "/launch ", 9);
-		assert.ok(s);
-		assert.ok(s!.values.length > 0);
+	it("does not suggest GDB verbs as slash commands", async () => {
+		const s = await suggest(p, "/run", 4);
+		assert.equal(s, null);
+		const b = await suggest(p, "/br", 3);
+		assert.equal(b, null);
+		const r = await suggest(p, "/remove", 7);
+		assert.equal(r, null);
 	});
 
-	it("offers a `..` parent directory for path completion", async () => {
-		const s = await suggest(p, "/launch ", 9);
+	it("suggests only the aidb organizing commands in the slash menu", async () => {
+		const s = await suggest(p, "/", 1);
 		assert.ok(s);
-		assert.ok(s!.values.some((v) => v.startsWith("..")));
-		const up = s!.items[0]!;
-		assert.ok(up.value.startsWith(".."));
-		const r = apply(p, "/launch ", up.value, "");
-		assert.equal(r.text, `/launch ${up.value}`);
+		const vals = s!.values;
+		assert.ok(vals.includes("session"));
+		assert.ok(vals.includes("open"));
+		assert.ok(vals.includes("win"));
+		// GDB verbs are bare, not slash-completable.
+		assert.ok(!vals.includes("run"));
+		assert.ok(!vals.includes("break"));
+		assert.ok(!vals.includes("continue"));
 	});
 });

@@ -5,7 +5,7 @@
  * line, argument hint, and — critically — the completion source for each
  * argument position. Wiring it into `CombinedAutocompleteProvider` gives us
  * pi-tui's native fuzzy command-name matching plus our own per-token argument
- * completion (panes, visualizer types, interpreters, files, breakpoints).
+ * completion (panes, visualizer types, interpreters, saved names).
  *
  * Why a custom provider pass? The stock `CombinedAutocompleteProvider` treats
  * the whole post-space argument text as a single completion token, so
@@ -15,9 +15,6 @@
  * paths, `@` fuzzy files) fall through to stock.
  */
 
-import * as os from "node:os";
-import * as path from "node:path";
-import { readdirSync, statSync } from "node:fs";
 import {
 	CombinedAutocompleteProvider,
 	fuzzyMatch,
@@ -46,8 +43,6 @@ interface Cmd {
 	) => AutocompleteItem[] | null;
 }
 
-const HOME = os.homedir();
-
 // ---------- fuzzy helpers ---------- (score: lower = better)
 
 function fuzzyItems<T extends AutocompleteItem>(
@@ -63,80 +58,6 @@ function fuzzyItems<T extends AutocompleteItem>(
 		.sort((a, b) => a.m.score - b.m.score)
 		.slice(0, limit)
 		.map((x) => x.item);
-}
-
-// ---------- file completion ----------
-
-function isDirectory(fullPath: string): boolean {
-	try {
-		return statSync(fullPath).isDirectory();
-	} catch {
-		return false;
-	}
-}
-/** List a directory, producing display-paths in the same style as `input`. */
-function listDir(
-	absDir: string,
-	makeValue: (name: string, isDir: boolean) => string,
-	fileBase: string,
-): AutocompleteItem[] {
-	let entries;
-	try {
-		entries = readdirSync(absDir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
-	const out: AutocompleteItem[] = [];
-	for (const entry of entries) {
-		if (fileBase && !entry.name.toLowerCase().startsWith(fileBase.toLowerCase())) continue;
-		const isDirEntry = entry.isDirectory() || (entry.isSymbolicLink() && isDirectory(path.join(absDir, entry.name)));
-		out.push({
-			value: makeValue(entry.name, isDirEntry),
-			label: entry.name + (isDirEntry ? "/" : ""),
-			description: path.join(absDir, entry.name),
-		});
-	}
-	out.sort(
-		(a, b) =>
-			Number(b.label.endsWith("/")) - Number(a.label.endsWith("/")) || a.label.localeCompare(b.label),
-	);
-	return out;
-}
-
-/** Complete a path token, mirroring the user's `~ /` absolute/relative style. */
-function completePath(input: string): AutocompleteItem[] {
-	if (input === "~") return withParentPrefix(listDir(HOME, (n, d) => `~/${n}${d ? "/" : ""}`, ""), "~/..");
-	if (input === "~/") return withParentPrefix(listDir(HOME, (n, d) => `~/${n}${d ? "/" : ""}`, ""), "~/..");
-	if (input.startsWith("~/")) {
-		const rel = input.slice(2);
-		const idx = rel.lastIndexOf("/");
-		if (idx === -1) return withParentPrefix(listDir(HOME, (n, d) => `~/${n}${d ? "/" : ""}`, rel), "~/..");
-		const dirPart = rel.slice(0, idx + 1);
-		const base = rel.slice(idx + 1);
-		return withParentPrefix(
-			listDir(path.join(HOME, dirPart), (n, d) => `~/${dirPart}${n}${d ? "/" : ""}`, base),
-			`~/${dirPart}..`,
-		);
-	}
-	if (input.startsWith("/")) {
-		const idx = input.lastIndexOf("/");
-		const dirPart = input.slice(0, idx + 1);
-		const base = input.slice(idx + 1);
-		const items = listDir(dirPart, (n, d) => `${dirPart}${n}${d ? "/" : ""}`, base);
-		return dirPart === "/" ? items : withParentPrefix(items, `${dirPart}..`);
-	}
-	const idx = input.lastIndexOf("/");
-	const dirPart = idx >= 0 ? input.slice(0, idx + 1) : "";
-	const base = idx >= 0 ? input.slice(idx + 1) : input;
-	const items = listDir(path.join(process.cwd(), dirPart), (n, d) => `${dirPart}${n}${d ? "/" : ""}`, base);
-	return withParentPrefix(items, `${dirPart}..`);
-}
-
-/** Prepend a “..” parent-directory entry (a navigable dir) to a listing. */
-function withParentPrefix(items: AutocompleteItem[], upValue: string): AutocompleteItem[] {
-	if (!upValue) return items;
-	const value = upValue.endsWith("/") ? upValue : `${upValue}/`;
-	return [{ value, label: upValue, description: "parent directory" }, ...items];
 }
 
 // ---------- pane & visualizer sources ----------
@@ -156,6 +77,8 @@ const WIN_SUBCOMMANDS: AutocompleteItem[] = [
 	{ value: "hsplit", label: "hsplit", description: "split a pane into rows" },
 	{ value: "close", label: "close", description: "close a pane" },
 	{ value: "next", label: "next", description: "make the next pane active" },
+	{ value: "switch", label: "switch", description: "make a pane active" },
+	{ value: "swap", label: "swap", description: "exchange two panes' cells" },
 	{ value: "list", label: "list", description: "print idx → id mapping" },
 	{ value: "load", label: "load", description: "bind a live visualizer into a pane" },
 	{ value: "pick", label: "pick", description: "swap an interpreter / toggle a flag" },
@@ -202,53 +125,103 @@ function winCompletion(ctx: ReplContext, tokens: string[], pos: number, current:
 			if (pos === 1) return paneItems(ctx, current);
 			if (pos === 2) return [...interpreterItems(current), ...flagItems(current)];
 			return null;
+		case "switch":
 		case "close":
 		case "vsplit":
 		case "hsplit":
 			if (pos === 1) return paneItems(ctx, current);
+			return null;
+		case "swap":
+			if (pos === 1 || pos === 2) return paneItems(ctx, current);
 			return null;
 		default:
 			return null;
 	}
 }
 
-/** `/remove` — breakpoints installed on the current target. */
-function breakpointItems(ctx: ReplContext, current: string): AutocompleteItem[] {
-	const items = [...ctx.getApi().breakpoints.values()].map((bp) => ({
-		value: String(bp.id),
-		label: String(bp.id),
-		description: bp.location ?? (bp.file ? `${bp.file}:${bp.line}` : bp.file) ?? "",
+
+/** `/session` — `save` only, or a saved session name to restore. */
+function sessionCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
+	if (pos === 0) return sessionNameItems(ctx, current);
+	const first = tokens[0];
+	if (first === "save") return sessionNameItems(ctx, current);
+	return null;
+}
+
+/** `/target` — subcommands, or a program path (subcommand wins on the exact word). */
+/** `/target` — `save` only, or a saved target profile name to load. */
+function targetCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
+	if (pos === 0) return targetNameItems(ctx, current);
+	const first = tokens[0];
+	if (first === "save") return targetNameItems(ctx, current);
+	return null;
+}
+
+/** Saved target profile names (for `/target switch <name>` etc.). */
+function targetNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	const items = (ctx.sessions?.targets.list() ?? []).map((t) => ({
+		value: t.name,
+		label: t.name,
+		description: `${t.program ?? (t.kind === "attach" ? `attach pid ${t.pid}` : "")}${t.args.length ? `  ${t.args.join(" ")}` : ""}`.trim(),
+	}));
+	return fuzzyItems(items, current);
+}
+
+/** `/layout` — subcommands (no free-form first token). */
+/** `/layout` — `save` only, or a saved layout name to apply. */
+function layoutCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
+	if (pos === 0) return layoutNameItems(ctx, current);
+	const first = tokens[0];
+	if (first === "save") return layoutNameItems(ctx, current);
+	return null;
+}
+
+/** Saved layout profile names (for `/layout switch <name>` etc.). */
+function layoutNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	const items = (ctx.sessions?.layouts.list() ?? []).map((l) => ({
+		value: l.name,
+		label: l.name,
+		description: `${l.panes} pane(s) · ${l.watchEntries} watch`,
+	}));
+	return fuzzyItems(items, current);
+}
+
+/** Saved session names (for `/session switch <name>` etc.). */
+function sessionNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	const items = (ctx.sessions?.list() ?? []).map((s) => ({
+		value: s.name,
+		label: s.name,
+		description: `${s.target ? `${s.target} · ` : ""}${s.layout ? `[${s.layout}] · ` : ""}bp ${s.breakpoints}`.trim(),
 	}));
 	return fuzzyItems(items, current);
 }
 
 // ---------- registry ----------
 
+/**
+ * THE slash-command registry — ONLY aidb's own organizing commands.
+ * GDB verbs (run, break, step, continue, print, ...) are BARE commands
+ * handled by the non-slash dispatcher in repl.ts; they are deliberately NOT
+ * offered as slash commands. Their old slash forms still work as invisible
+ * aliases in handleSlashCommand, but completion never suggests them, so
+ * `/` shows a clean, small menu: the two finders, the three nouns, and a
+ * few universal verbs.
+ */
 const COMMANDS: Cmd[] = [
 	{ name: "help", description: "show help", argumentHint: "[topic]" },
-	{ name: "run", description: "start or restart the target", argumentHint: "[program] [args...]",
-		args: (_, tokens, pos, cur) => (pos === 0 ? completePath(cur) : null) },
-	{ name: "launch", description: "launch a program", argumentHint: "<program> [args...]",
-		args: (_, tokens, pos, cur) => (pos === 0 ? completePath(cur) : null) },
-	{ name: "attach", description: "attach to a pid", argumentHint: "<pid>" },
-	{ name: "break", description: "set a breakpoint", argumentHint: "<file:line | line | function> [if cond]",
-		args: (_, tokens, pos, cur) => (pos === 0 ? completePath(cur) : null) },
-	{ name: "breaks", description: "list breakpoints", argumentHint: "" },
-	{ name: "remove", description: "remove breakpoint(s)", argumentHint: "[id...]",
-		args: (ctx, tokens, pos, cur) => (pos === 0 ? breakpointItems(ctx, cur) : null) },
-	{ name: "step", description: "step into (<stepInto>)", argumentHint: "" },
-	{ name: "next", description: "step over (<stepOver>)", argumentHint: "" },
-	{ name: "finish", description: "step out (<stepOut>)", argumentHint: "" },
-	{ name: "continue", description: "resume execution", argumentHint: "" },
-	{ name: "stack", description: "backtrace", argumentHint: "" },
-	{ name: "locals", description: "variables of the current frame", argumentHint: "" },
-	{ name: "status", description: "target state", argumentHint: "" },
-	{ name: "switch", description: "make a pane active", argumentHint: "<idx|name>",
-		args: (ctx, tokens, pos, cur) => (pos === 0 ? paneItems(ctx, cur) : null) },
+	{ name: "session", description: "saved debugger sessions", argumentHint: "[name] | save [name]",
+		args: sessionCompletion },
+	{ name: "target", description: "saved target profiles", argumentHint: "[name] | save <name>",
+		args: targetCompletion },
+	{ name: "layout", description: "saved layout profiles", argumentHint: "[name] | save <name>",
+		args: layoutCompletion },
+	{ name: "open", description: "one finder over sessions · layouts · targets", argumentHint: "" },
+	{ name: "settings", description: "effective configuration", argumentHint: "" },
 	{ name: "win", description: "pane management", argumentHint: "<sub> [...]",
 		args: winCompletion },
+	{ name: "watch", description: "pin an expression to a watch pane", argumentHint: "<expr> | cycle [n] | flag <n> [n] | del <n>" },
 	{ name: "config", description: "inspect or reload config", argumentHint: "[reload]" },
-	{ name: "watch", description: "pin an expression to a watch pane", argumentHint: "<expr> | list | cycle [n] | flag <n> [n] | del <n>" },
+	{ name: "new", description: "create a fresh session/target", argumentHint: "[name]" },
 	{ name: "quit", description: "exit aidb", argumentHint: "" },
 ];
 

@@ -93,6 +93,12 @@ export class AidbEditor extends Editor {
 	 * suggestion but leaves the prompt open — forcing a second Enter to run the
 	 * command. Here we detect that "applied but not submitted" result and
 	 * submit it ourselves after the stock handler runs.
+	 *
+	 * The post-check requires the line to STILL start with a slash: a bare
+	 * picker command (`/session`, `/open`, …) submits, and the fuzzy finder
+	 * synchronously rewrites the prompt to `> <query>` — which is non-empty
+	 * but not a slash command. Without this guard, the rewritten prompt would
+	 * be mistaken for an un-submitted completion and submitted again.
 	 */
 	override handleInput(data: string): void {
 		const autocompleteShown = this.isShowingAutocomplete();
@@ -104,8 +110,9 @@ export class AidbEditor extends Editor {
 		super.handleInput(data);
 
 		// Upstream applied the argument completion and kept the prompt open
-		// (text non-empty) instead of submitting. Run the command now.
-		if (isSlashConfirm && !this.isShowingAutocomplete() && this.getText()) {
+		// (a line still starting with a slash) instead of submitting. Run the
+		// command now.
+		if (isSlashConfirm && !this.isShowingAutocomplete() && this.getText().trimStart().startsWith("/")) {
 			this.submitForSlash();
 		}
 	}
@@ -153,11 +160,27 @@ export class AidbEditor extends Editor {
 	}
 }
 
+/**
+ * A source of overlay lines, evaluated every composite pass. Returns a
+ * non-empty list to show, or null/[] to contribute nothing that frame.
+ * Receives the resolved overlay width so sources like the fuzzy picker can
+ * truncate to the actual band width.
+ */
+export type OverlayLineSource = (width: number) => readonly string[] | null;
+
 export interface DropdownOverlayOptions {
 	/** Rows between the overlay's bottom edge and the editor's bottom border (e.g. status bar). */
 	rowsBelow?: () => number;
 	/** Cap on dropdown height, as pi-tui SizeValue. */
 	maxHeight?: SizeValue;
+	/**
+	 * Extra line sources composited before the editor's own dropdown (first
+	 * non-empty wins). Lets another popup — e.g. the fuzzy picker — ride the
+	 * SAME overlay + geometry as the slash dropdown instead of opening a
+	 * second one, so width and live `offsetY` are identical by construction.
+	 * Read live each pass, so sources can be registered/unregistered.
+	 */
+	sources?: OverlayLineSource[];
 }
 
 export interface DropdownOverlayHandle {
@@ -165,13 +188,22 @@ export interface DropdownOverlayHandle {
 	readonly options: OverlayOptions;
 }
 
+/** The shared band's own source: the editor's stashed dropdown (last in priority). */
+function editorDropdownSource(editor: AidbEditor): OverlayLineSource {
+	return (_width: number) => {
+		const lines = editor.dropdownLines;
+		return lines && lines.length > 0 ? [...lines] : null;
+	};
+}
+
 /**
- * Host `editor.dropdownLines` in a non-capturing overlay docked directly
- * above the prompt. The editor keeps keyboard focus; the overlay entry stays
- * mounted for the app's lifetime and simply renders nothing while there are
- * no suggestions. Because compositeOverlays runs after the base render pass,
- * freshly-stashed lines composite in the same frame they arrive, and geometry
- * (offsetY) is recomputed every pass.
+ * Host a line source (the slash dropdown, plus anything routed through it —
+ * the fuzzy picker) in a non-capturing overlay docked directly above the
+ * prompt. The editor keeps keyboard focus; the overlay entry stays mounted
+ * for the app's lifetime and simply renders nothing while every source is
+ * silent. Because compositeOverlays runs after the base render pass,
+ * freshly-produced lines composite in the same frame they arrive, and
+ * geometry (offsetY) is recomputed every pass.
  */
 export function attachDropdownOverlay(
 	tui: TUI,
@@ -189,12 +221,17 @@ export function attachDropdownOverlay(
 
 	const component: Component = {
 		invalidate(): void {},
-		render(_width: number): string[] {
+		render(width: number): string[] {
 			// Read fresh every composite pass; resolveOverlayLayout re-runs after
 			// this returns, so the mutated offset applies to this very frame.
 			overlayOptions.offsetY = -(rowsBelow() + editor.lastHeight);
-			const lines = editor.dropdownLines;
-			return lines && lines.length > 0 ? [...lines] : [];
+			// Custom sources first (first non-empty wins), then the editor's own
+			// dropdown. `sources` is read live so callers can register/unregister.
+			for (const source of options.sources ?? []) {
+				const lines = source(width);
+				if (lines && lines.length > 0) return [...lines];
+			}
+			return [...(editorDropdownSource(editor)(width) ?? [])];
 		},
 	};
 
