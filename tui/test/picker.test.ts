@@ -106,7 +106,6 @@ describe("openPicker", () => {
 		assert.ok(lines[0]!.includes("bug1"), "first row is the first narrowed item (no filter row on top)");
 		assert.ok(lines.some((line) => line.includes("memleak")));
 		assert.ok(lines.some((line) => line.includes("Esc cancel")));
-		assert.ok(lines.some((line) => line.includes("Del cancel")));
 		const joined = lines.join("\n");
 		assert.ok(!joined.includes("filter:"), "the query lives in the prompt, not the band");
 		assert.ok(!joined.includes("\u250c"), "no box top-left corner — chrome-less like the slash dropdown");
@@ -245,18 +244,6 @@ describe("openPicker", () => {
 		assert.ok(h.cancelled);
 		assert.ok(!pickerActive());
 		assert.deepEqual(h.picked, null);
-	});
-
-	it("Delete cancels the finder (forward-delete has nothing to edit in a filter)", () => {
-		installPickerHost(null);
-		const h = harness(SESSIONS);
-		h.send("m");
-		h.send("e");
-		assert.equal(h.prompt, "> me", "filter lives in the prompt");
-		h.send("\x1b[3~"); // Delete
-		assert.ok(h.cancelled);
-		assert.ok(!pickerActive());
-		assert.equal(h.prompt, "");
 	});
 
 	it("Enter with no matches does nothing", () => {

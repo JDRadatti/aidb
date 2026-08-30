@@ -247,7 +247,7 @@ function buildBand(
 				...(options.onDelete ? ["ctrl+d delete"] : []),
 				...(options.onRename ? ["ctrl+r rename"] : []),
 				"Esc cancel",
-				"Del cancel",		  ].join(" · ");
+		  ].join(" · ");
 	lines.push(colors.muted(footer));
 	return lines;
 }
@@ -349,13 +349,6 @@ export function openPicker(options: PickerOptions): void {
 			createLabelText = built.createLabelText;
 			syncPrompt(filter);
 			host?.requestRender();
-			return { consume: true };
-		}
-
-		// Forward-delete has nothing to edit in a filter — cancelling is the
-		// intuitive action (Backspace narrows, Del dismisses).
-		if (matchesKey(data, "delete")) {
-			close("cancel");
 			return { consume: true };
 		}
 
