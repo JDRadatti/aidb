@@ -8,61 +8,90 @@ const plain = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 function freshState(over: Partial<IntroState> = {}): IntroState {
 	return {
 		debuggerLabel: "aidb — GDB debugger via DAP",
-		gdbState: "idle",
-		session: { name: null, breakpoints: 0, pending: 0, autoSave: true },
-		target: null,
-		layout: { name: null, paneIds: ["repl"] },
-		viz: ["regs", "mem", "plot", "tree", "source", "asm", "iasm"],
-		keys: "F5 continue · F10 next · F11 step",
-		config: { found: ["./.aidb.json", "~/.aidbrc"], issues: 0 },
-		history: null,
+		autoSave: true,
+		sessions: [],
+		targets: [],
+		layouts: [],
 		...over,
 	};
 }
 
 describe("renderIntro", () => {
-	it("renders the bracketed capability tags on a fresh start", () => {
+	it("renders the collection tags with none-yet hints on a fresh start", () => {
 		const lines = renderIntro(freshState()).map(plain);
 		assert.ok(lines[0]!.includes("aidb — GDB debugger via DAP"));
-		assert.ok(lines.some((line) => /^\[session\]/.test(line)));
-		assert.ok(lines.some((line) => /^\[session\]/.test(line) && line.includes("fresh session")));
-		assert.ok(lines.some((line) => /^\[target\]/.test(line) && line.includes("none yet")));
-		assert.ok(lines.some((line) => /^\[layout\]/.test(line) && line.includes("single-pane")));
-		assert.ok(lines.some((line) => /^\[viz\]/.test(line) && line.includes("asm")));
-		assert.ok(lines.some((line) => /^\[keys\]/.test(line) && line.includes("F5 continue")));
-		assert.ok(lines.some((line) => /^\[config\]/.test(line) && line.includes(".aidb.json")));
+		assert.ok(lines.some((line) => /^\[sessions\]/.test(line)));
+		assert.ok(lines.some((line) => /^\[targets\]/.test(line)));
+		assert.ok(lines.some((line) => /^\[layouts\]/.test(line)));
+		// Every collection tag is followed by at least one indented line.
+		const nextAfter = (tagText: string): string => {
+			const i = lines.findIndex((line) => line === tagText);
+			assert.ok(i !== -1, `missing [${tagText}]`);
+			return lines[i + 1]!;
+		};
+		for (const tagText of ["[sessions]", "[targets]", "[layouts]"]) {
+			assert.ok(nextAfter(tagText).startsWith("  "), `${tagText} must have an indented row`);
+		}
+		// Under the divider: just the /help pointer (with a description).
+		const helpLine = lines.find((line) => line.includes("/help"));
+		assert.ok(helpLine, "expected a /help pointer");
+		assert.ok(helpLine!.includes("full command reference"), helpLine);
+		// The verb banner is gone; no line carries the old comma-list of verbs.
+		assert.ok(!lines.some((line) => line.includes("· continue · next · step")));
 	});
 
-	it("renders the live annotations after a session is resumed", () => {
+	it("lists saved items one indented line each, marking the current with ✳", () => {
 		const lines = renderIntro(
 			freshState({
-				gdbState: "stopped",
-				session: { name: "bug1", breakpoints: 3, pending: 1, autoSave: true },
-				target: { name: "game", program: "./game", args: ["--seed", "42"], kind: "launch" },
-				layout: { name: "code-watch", paneIds: ["repl", "watch", "regs"] },
-				history: 247,
+				sessions: [
+					{ name: "bug1", current: true, target: "game", layout: "code-watch", breakpoints: 3 },
+					{ name: "scratch", current: false, target: null, layout: null, breakpoints: 0 },
+				],
+				targets: [
+					{ name: "game", current: true, kind: "launch", program: "./game", args: ["--seed", "42"] },
+					{ name: "hello", current: false, kind: "launch", program: "./hello", args: [] },
+				],
+				layouts: [
+					{ name: "code-watch", current: true, panes: 3, watchEntries: 2, livePaneCount: 1 },
+					{ name: "single", current: false, panes: 1, watchEntries: 0, livePaneCount: 0 },
+				],
 			}),
 		).map(plain);
-		assert.ok(lines.some((line) => /^\[session\]/.test(line) && line.includes("bug1") && line.includes("3 bp (1 pending)")));
-		assert.ok(lines.some((line) => /^\[target\]/.test(line) && line.includes("./game --seed 42")));
-		assert.ok(lines.some((line) => /^\[layout\]/.test(line) && line.includes("3 panes")));
-		assert.ok(lines.some((line) => /^\[history\]/.test(line) && line.includes("247")));
-		assert.ok(lines.some((line) => /^\[session\]/.test(line) && line.includes("stopped")));
+		// Sessions: name · target · layout · bp count.
+		const sessionRows = lines
+			.filter((line) => /^  /.test(line))
+			.filter((line) => line.includes("bp "));
+		assert.ok(sessionRows.some((line) => line.includes("bug1 ✳ · game · code-watch · bp 3")));
+		assert.ok(sessionRows.some((line) => line.includes("scratch · no target · no layout · bp 0")));
+		// Targets: attach pid form renders too.
+		const withAttach = renderIntro(
+			freshState({ targets: [{ name: "remote", current: false, kind: "attach", args: [], pid: 1234 }] }),
+		).map(plain);
+		assert.ok(withAttach.some((line) => line.includes("remote · attach pid 1234")));
+		// Layouts: pane/watch counts.
+		const layoutRows = lines.filter((line) => /^  /.test(line)).filter((line) => line.includes("pane"));
+		assert.ok(layoutRows.some((line) => line.includes("code-watch ✳ · 3 panes · 2 watch · 1 live")));
+		assert.ok(layoutRows.some((line) => line.includes("single · 1 pane · 0 watch")));
 	});
 
-	it("shows pending breaks without cluttering when there are none", () => {
-		const lines = renderIntro(
-			freshState({ session: { name: "bug1", breakpoints: 2, pending: 0, autoSave: true } }),
-		).map(plain);
-		const sessionLine = lines.find((line) => /^\[session\]/.test(line))!;
-		assert.ok(!sessionLine.includes("pending"));
-		assert.ok(sessionLine.includes("2 bp"));
+	it("says sessions are off instead of listing when auto-save is disabled", () => {
+		const lines = renderIntro(freshState({ autoSave: false })).map(plain);
+		const i = lines.findIndex((line) => line === "[sessions]");
+		assert.ok(i !== -1);
+		assert.ok(lines[i + 1]!.includes("off"));
 	});
 
 	it("caps every line to the banner width (ANSI-aware)", () => {
 		const over = {
-			session: { name: "a-very-long-session-name-that-should-be-truncated-for-sure-" + "x".repeat(60), breakpoints: 999, pending: 999, autoSave: true },
-			target: { name: "game", program: "./game", args: new Array(20).fill("--flag").flat(), kind: "launch" as const },
+			sessions: [
+				{ name: "a-very-long-session-name-that-should-be-truncated-for-sure-" + "x".repeat(60), current: true, target: "another-long-target-name-here", layout: "yet-another-long-layout", breakpoints: 999 },
+			],
+			targets: [
+				{ name: "game", current: true, kind: "launch" as const, program: "./game", args: new Array(20).fill("--flag").flat() },
+			],
+			layouts: [
+				{ name: "grid", current: true, panes: 9, watchEntries: 999, livePaneCount: 99 },
+			],
 		};
 		const lines = renderIntro(freshState(over));
 		for (const line of lines) {

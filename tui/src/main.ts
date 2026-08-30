@@ -14,14 +14,7 @@ import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import * as fs from "node:fs";
 import { AidbEditor, attachDropdownOverlay } from "./completion-overlay.ts";
 import { colors, applyTheme, createEditorTheme } from "./theme.ts";
-import {
-	loadConfig,
-	resolveAction,
-	actionKeyLabel,
-	type Action,
-	type Config,
-	type ConfigSources,
-} from "./config.ts";
+import { loadConfig, resolveAction, type Action, type Config, type ConfigSources } from "./config.ts";
 import {
 	handleReplInput,
 	refreshLivePanes,
@@ -606,54 +599,57 @@ async function resetDebugger(): Promise<DebuggerAPI> {
 
 /* ------------------------------------------------------------- intro banner ----- */
 
-/** Persisted command count from the history file (best-effort). */
-function historyCount(): number | null {
-	try {
-		if (!fs.existsSync(config.sessions.historyPath)) return null;
-		const lines = fs.readFileSync(config.sessions.historyPath, "utf8").split("\n");
-		return lines.filter((line) => line.trim().length > 0).length;
-	} catch {
-		return null;
-	}
+function savedSessionName(): string | null {
+	const explicit = store().sessions.activeName();
+	if (explicit) return explicit;
+	const implicit = activeSessionName();
+	return store().sessions.list().some((s) => s.name === implicit) ? implicit : null;
 }
 
-/** Key-hint summary from the live action bindings (remap-aware). */
-function keysSummary(): string {
-	const actions = config.keybindings.actions;
-	const parts: string[] = [];
-	for (const action of ["continue", "stepOver", "stepInto", "stepOut"] as const) {
-		parts.push(`${actionKeyLabel(actions, action)} ${action}`);
-	}
-	return parts.join(" · ");
+/** The current target's persisted name (explicit, or its implicit UUID once saved). */
+function savedTargetName(): string | null {
+	const explicit = store().targets.activeName();
+	if (explicit) return explicit;
+	const implicit = activeTargetName();
+	return implicit && store().targets.list().some((t) => t.name === implicit) ? implicit : null;
 }
 
-/** Build the banner state from the live stores/config/api. */
+/** The current layout's persisted name, or null when none is saved. */
+function savedLayoutName(): string | null {
+	return store().layouts.activeName();
+}
+
+/** Build the banner state from the live stores/config. */
 function introState(): IntroState {
-	const t = getLastLaunch();
-	const breakpoints = [...dbg.api.breakpoints.values()];
-	const pending = breakpoints.filter((bp) => !bp.verified).length;
-	const panes = windows.list().map((p) => p.id);
+	const s = store();
+	const currentSession = savedSessionName();
+	const currentTarget = savedTargetName();
+	const currentLayout = savedLayoutName();
 	return {
 		debuggerLabel: "aidb — GDB debugger via DAP",
-		gdbState: dbg.api.getState(),
-		session: {
-			name: store().sessions.activeName(),
-			breakpoints: breakpoints.length,
-			pending,
-			autoSave: config.sessions.autoSave,
-		},
-		target: t ? { name: activeTargetName(), program: t.program, args: t.args, kind: "launch" } : null,
-		layout: {
-			name: store().layouts.activeName(),
-			paneIds: panes,
-		},
-		viz: ["regs", "mem", "plot", "tree", "source", "asm", "iasm"],
-		keys: keysSummary(),
-		config: {
-			found: [configSources.project, configSources.rc].filter((f): f is string => Boolean(f)),
-			issues: configSources.issues.length,
-		},
-		history: historyCount(),
+		autoSave: config.sessions.autoSave,
+		sessions: s.sessions.list().map((m) => ({
+			name: m.name,
+			current: m.name === currentSession,
+			target: m.target ?? null,
+			layout: m.layout ?? null,
+			breakpoints: m.breakpoints,
+		})),
+		targets: s.targets.list().map((m) => ({
+			name: m.name,
+			current: m.name === currentTarget,
+			kind: m.kind,
+			program: m.program,
+			args: m.args,
+			pid: m.pid,
+		})),
+		layouts: s.layouts.list().map((m) => ({
+			name: m.name,
+			current: m.name === currentLayout,
+			panes: m.panes,
+			watchEntries: m.watchEntries,
+			livePaneCount: m.livePaneCount,
+		})),
 	};
 }
 

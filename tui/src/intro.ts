@@ -1,15 +1,15 @@
 /**
- * Startup banner — pi-style bracketed capability tags, annotated with live
- * state. One pure generator: the host (main.ts) builds an IntroState from the
- * stores/config/api and prints each returned line to the transcript.
+ * Startup banner — pi-style bracketed capability tags, annotated with the
+ * *saved* state: one indented line per saved session / target / layout. One
+ * pure generator: the host (main.ts) builds an IntroState from the stores
+ * and prints each returned line to the transcript.
  *
  * Rules:
- *  - Every `[tag]` line is a *capability*: it lists what aidb can do, and the
- *    annotation is current state, not copy.
- *  - `viz` is generated from the interpreter registry at build time (via the
- *    caller passing the list), so it can't advertise something we don't ship.
- *  - `keys` is generated from the action keybindings (already remapped), so
- *    remaps stay true.
+ *  - Every `[tag]` line names a collection (sessions/targets/layouts) and is
+ *    followed by one indented line per saved item, `✳` marking the current
+ *    one (same mark the pickers use).
+ *  - After the divider the banner only points at /help (the full command
+ *    sheet lives there); it doesn't duplicate the list.
  *  - Lines are capped so the tags survive narrow terminals.
  *
  * Unit/golden testable: no terminal, no debugger, no stores.
@@ -20,54 +20,84 @@ import { colors } from "./theme.ts";
 
 export const INTRO_WIDTH = 76;
 
-export interface IntroTarget {
-	name: string | null;
-	program: string | null;
-	args: string[];
+export interface IntroSessionItem {
+	name: string;
+	/** True for the session currently restored. */
+	current: boolean;
+	target: string | null;
+	layout: string | null;
+	breakpoints: number;
+}
+export interface IntroTargetItem {
+	name: string;
+	current: boolean;
 	kind: "launch" | "attach";
+	program?: string;
+	args: string[];
 	pid?: number;
+}
+export interface IntroLayoutItem {
+	name: string;
+	current: boolean;
+	panes: number;
+	watchEntries: number;
+	livePaneCount: number;
 }
 
 export interface IntroState {
 	/** Debugger label, e.g. "GDB debugger via DAP". */
 	debuggerLabel: string;
-	/** gdb session state ("stopped" | "running" | "idle" | ...). */
-	gdbState: string;
-	session: {
-		name: string | null;
-		breakpoints: number;
-		pending: number;
-		autoSave: boolean;
-	};
-	target: IntroTarget | null;
-	layout: {
-		name: string | null;
-		paneIds: string[];
-	};
-	/** The visualizer keywords this build ships (from the registry). */
-	viz: string[];
-	/** Short key-hint string, e.g. "F5 continue · F10 next". */
-	keys: string;
-	config: {
-		found: string[];
-		issues: number;
-	};
-	/** Persisted command count, or null when unavailable. */
-	history: number | null;
+	/** Whether session state auto-saves (config.sessions.autoSave). */
+	autoSave: boolean;
+	sessions: IntroSessionItem[];
+	targets: IntroTargetItem[];
+	layouts: IntroLayoutItem[];
 }
 
 const tag = (label: string): string => colors.accent(`[${label}]`);
+const indent = (line: string): string => `  ${line}`;
+const DIVIDER = colors.muted("\u2500".repeat(Math.min(INTRO_WIDTH, 52)));
 
 /** Truncate a colored line to INTRO_WIDTH (ANSI-aware; no ellipsis). */
 function cap(line: string): string {
 	return truncateToWidth(line, INTRO_WIDTH, "", false);
 }
 
-/** Plain (uncolored) summary of a target, e.g. `./game --seed 42`. */
-function targetLine(target: IntroTarget): string {
-	const base = target.program ?? (target.kind === "attach" ? `attach pid ${target.pid ?? "?"}` : "—");
-	const args = target.args.length > 0 ? ` ${target.args.join(" ")}` : "";
-	return `${base}${args}`;
+/** `name ✳` when the item is the one currently open; plain name otherwise. */
+function nameTag(name: string, current: boolean): string {
+	const base = colors.bold(colors.accent(name));
+	return current ? `${base}${colors.muted(" ✳")}` : base;
+}
+
+/** `name ✳ · target · layout · bp 3` (bare names, same grammar as the pickers). */
+function sessionItem(s: IntroSessionItem): string {
+	const tail = `${s.target ?? "no target"} · ${s.layout ?? "no layout"} · bp ${s.breakpoints}`;
+	return `${nameTag(s.name, s.current)} · ${colors.muted(tail)}`;
+}
+
+/** `name ✳ · ./game --seed 42` (or `attach pid 1234`). */
+function targetItem(t: IntroTargetItem): string {
+	const cmd = t.kind === "launch" ? (t.program ?? "?") : `attach pid ${t.pid ?? "?"}`;
+	const args = t.args.length > 0 ? ` ${t.args.join(" ")}` : "";
+	return `${nameTag(t.name, t.current)} · ${colors.muted(`${cmd}${args}`)}`;
+}
+
+/** `name ✳ · 4 panes · 2 watch · 1 live`. */
+function layoutItem(l: IntroLayoutItem): string {
+	const parts = [`${l.panes} ${l.panes === 1 ? "pane" : "panes"}`, `${l.watchEntries} watch`];
+	if (l.livePaneCount > 0) parts.push(`${l.livePaneCount} live`);
+	return `${nameTag(l.name, l.current)} · ${colors.muted(parts.join(" · "))}`;
+}
+
+/** A `[tag]` line + its saved item lines (or a hint when the collection is empty). */
+function collectionLines(tagName: string, items: string[], empty: string): string[] {
+	const lines = [tag(tagName)];
+	if (items.length === 0) {
+		lines.push(indent(colors.muted(empty)));
+	} else {
+		for (const item of items) lines.push(indent(item));
+	}
+	return lines;
 }
 
 /**
@@ -80,72 +110,34 @@ export function renderIntro(state: IntroState): string[] {
 		if (line.trim()) out.push(cap(line));
 	};
 
-	push(colors.accent(`${state.debuggerLabel}`));
-	push(colors.muted("\u2500".repeat(Math.min(INTRO_WIDTH, 52))));
+	push(colors.accent(state.debuggerLabel));
+	push(DIVIDER);
 
-	/* [session] — name · bp count · pending · auto-save */
-	let sessionLine = `${tag("session")} `;
-	const name = state.session.name;
-	if (name) {
-		sessionLine += `${colors.bold(colors.accent(name))} · `;
-	} else {
-		sessionLine += `${colors.muted("fresh session")} · `;
-	}
-	const bpParts: string[] = [];
-	if (state.session.pending > 0) {
-		bpParts.push(colors.warning(`${state.session.breakpoints} bp (${state.session.pending} pending)`));
-	} else {
-		bpParts.push(colors.muted(`${state.session.breakpoints} bp`));
-	}
-	const autoSave = state.session.autoSave
-		? colors.success("\u25cf auto-save on")
-		: colors.muted("auto-save off");
-	sessionLine += `${bpParts.join(" · ")} · ${autoSave} · ${colors.muted(state.gdbState)}`;
-	push(sessionLine);
+	/* [sessions] — one indented line per saved session. */
+	for (const line of collectionLines(
+		"sessions",
+		state.sessions.map(sessionItem),
+		state.autoSave ? "none yet — set up a target and this session auto-saves here"
+			: "off — sessions.autoSave is false in the config",
+	)) push(line);
 
-	/* [target] */
-	if (state.target) {
-		const shared = state.target.name ? ` · ${colors.muted(`profile: ${state.target.name}`)}` : "";
-		push(`${tag("target")}  ${colors.muted("—")} ${targetLine(state.target)}${shared}`);
-	} else {
-		push(`${tag("target")}  ${colors.muted("none yet — file <program> or run <program> [args…]")}`);
-	}
+	/* [targets] */
+	for (const line of collectionLines(
+		"targets",
+		state.targets.map(targetItem),
+		"none yet — run <program> [args…] creates one",
+	)) push(line);
 
-	/* [layout] */
-	if (state.layout.paneIds.length === 1 && state.layout.paneIds[0] === "repl") {
-		push(`${tag("layout")}  ${colors.muted("single-pane repl")}`);
-	} else if (state.layout.paneIds.length > 0) {
-		const panes = state.layout.paneIds.length === 1 ? "1 pane" : `${state.layout.paneIds.length} panes`;
-		const ids = state.layout.name ? `${state.layout.name} · ` : "";
-		push(`${tag("layout")}  ${ids}${panes} (${state.layout.paneIds.join(" · ")})`);
-	} else {
-		push(`${tag("layout")}  ${colors.muted("none")}`);
-	}
+	/* [layouts] */
+	for (const line of collectionLines(
+		"layouts",
+		state.layouts.map(layoutItem),
+		"none yet — /layout save <name> keeps your panes",
+	)) push(line);
 
-	/* [windows] — static capability line. */
-	push(`${tag("windows")} vsplit · hsplit · close · load · pick — ${colors.muted("/win")}`);
+	push(DIVIDER);
 
-	/* [viz] — generated from the interpreter list the caller passes. */
-	if (state.viz.length > 0) {
-		push(`${tag("viz")}     ${state.viz.join(" · ")}`);
-	}
-
-	/* [keys] — remap-aware. */
-	if (state.keys) {
-		push(`${tag("keys")}    ${state.keys} · ${colors.muted("remappable in ~/.aidbrc")}`);
-	}
-
-	/* [config] */
-	const configLine = `${tag("config")}  ${colors.muted(state.config.found.join(" + ") || "defaults")}` +
-		(state.config.issues > 0 ? ` · ${colors.warning(`${state.config.issues} issue${state.config.issues === 1 ? "" : "s"}`)}` : "");
-	push(configLine);
-
-	/* [history] */
-	if (state.history !== null) {
-		push(`${tag("history")} ${state.history} command${state.history === 1 ? "" : "s"} remembered · ${colors.muted("Ctrl+P/N to recall")}`);
-	}
-
-	push(colors.muted("\u2500".repeat(Math.min(INTRO_WIDTH, 52))));
-	push(colors.muted("tip: break <file:line> first, then run. /help for the full sheet."));
+	/* The full command sheet lives in /help; the banner only points at it. */
+	push(`${colors.muted("/help")} — full command reference: debugging verbs, windows, slash commands`);
 	return out;
 }
