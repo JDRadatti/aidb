@@ -86,6 +86,7 @@ const DEFAULT_THEME: ThemeConfig = {
 	borderActive: 255,
 	borderInactive: 234,
 	paneBg: 235,
+	inputBg: 237,
 	keyword: 36,
 	string: 32,
 	number: 33,
@@ -98,9 +99,22 @@ const DEFAULT_THEME: ThemeConfig = {
 /** Live role set. Reassigned by `applyTheme`; imported by value by callers. */
 export const colors: ColorRoles = buildColors(DEFAULT_THEME);
 
+/** The live input-band background code, kept in sync by `applyTheme`. */
+let inputBandCode = DEFAULT_THEME.inputBg;
+
+/**
+ * Raw `48;5;Nm` background fill for the prompt/editor chrome band. The band's
+ * rendered lines carry per-span ANSI resets, so callers re-assert this fill
+ * after every `\x1b[0m` (see `tintBand` in completion-overlay.ts).
+ */
+export function inputBgFill(): string {
+	return `\x1b[48;5;${inputBandCode}m`;
+}
+
 /** Swap the live colour roles in place (idempotent; used by /config reload). */
 export function applyTheme(theme: ThemeConfig): void {
 	Object.assign(colors, buildColors(theme));
+	inputBandCode = theme.inputBg;
 }
 
 export function createEditorTheme(theme: ThemeConfig | undefined): EditorTheme {

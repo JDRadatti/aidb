@@ -30,6 +30,8 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 
+import { inputBgFill } from "./theme.ts";
+
 /** The pieces of Editor's autocomplete state the stripper needs. */
 interface EditorInternals {
 	autocompleteState(): unknown;
@@ -101,11 +103,19 @@ export class AidbEditor extends Editor {
 	 * be mistaken for an un-submitted completion and submitted again.
 	 */
 	override handleInput(data: string): void {
+		const kb = getKeybindings();
 		const autocompleteShown = this.isShowingAutocomplete();
 		const isSlashConfirm =
 			autocompleteShown &&
 			this.getText().trimStart().startsWith("/") &&
-			getKeybindings().matches(data, "tui.select.confirm");
+			kb.matches(data, "tui.select.confirm");
+		// gdb convention: recalling a previous command should land the cursor at
+		// the END (so you can edit the tail), but pi-tui's historyPrevious
+		// navigation parks it at the START. Both routes there — ctrl+p bound to
+		// `tui.editor.historyPrevious`, and ArrowUp - `cursorUp` - from the first
+		// line — are detected via the resolved keys, so remaps stay covered.
+		const recallsPrevious =
+			kb.matches(data, "tui.editor.historyPrevious") || kb.matches(data, "tui.editor.cursorUp");
 
 		super.handleInput(data);
 
@@ -115,6 +125,24 @@ export class AidbEditor extends Editor {
 		if (isSlashConfirm && !this.isShowingAutocomplete() && this.getText().trimStart().startsWith("/")) {
 			this.submitForSlash();
 		}
+
+		if (recallsPrevious) this.moveCursorToEndAfterRecall();
+	}
+
+	/**
+	 * Upstream `navigateHistory(-1)` leaves the cursor at column 0 of the
+	 * recalled line. Re-place it at the end — but only when history browsing
+	 * actually started (historyIndex >= 0): a plain cursor-up inside the
+	 * current line must not jump. Reads the TS-private internals with the same
+	 * shape-probe used by the dropdown stripper, so an upstream reshuffle
+	 * degrades to stock behavior.
+	 */
+	private moveCursorToEndAfterRecall(): void {
+		const rec = this as unknown as Record<string, unknown>;
+		if (typeof rec.historyIndex !== "number" || (rec.historyIndex as number) < 0) return;
+		const setTextInternal = rec.setTextInternal;
+		if (typeof setTextInternal !== "function") return;
+		(setTextInternal as (text: string, placement?: "start" | "end") => void).call(this, this.getText(), "end");
 	}
 
 	/** Clean up an argument-completed slash command by submitting it. */
@@ -131,9 +159,12 @@ export class AidbEditor extends Editor {
 			this.dropdownLines = null;
 			this.lastHeight = result.length;
 		};
+		// Chrome band: tint the editor block (border + input + border) with the
+		// theme's inputBg role so it reads as distinct chrome below the panes.
+		const tint = (lines: string[]): string[] => tintBand(lines, width);
 		if (!intern || intern.autocompleteState() === null || !intern.autocompleteList()) {
 			inactive();
-			return result;
+			return tint(result);
 		}
 		// Mirror Editor.render's width bookkeeping exactly so the recomputed
 		// block matches what stock would have appended.
@@ -152,12 +183,25 @@ export class AidbEditor extends Editor {
 		const matches = tail.length === expected.length && tail.every((line, i) => line === expected[i]);
 		if (!matches) {
 			inactive(); // upstream layout changed; fall back to inline rendering
-			return result;
+			return tint(result);
 		}
 		this.dropdownLines = expected;
 		this.lastHeight = start;
-		return result.slice(0, start);
+		return tint(result.slice(0, start));
 	}
+}
+
+/**
+ * Paint a chrome band: every cell gets the theme's `inputBg` fill. The lines
+ * carry per-span ANSI resets (`\x1b[0m`) that would clear the fill mid-line,
+ * so the fill is re-asserted after every reset, and the line is padded out to
+ * the band width so the fill spans the whole row.
+ */
+function tintBand(lines: readonly string[], width: number): string[] {
+	const fill = inputBgFill();
+	const paint = (line: string): string =>
+		`${fill}${line.replace(/\x1b\[0m/g, `\x1b[0m${fill}`)}${fill}\x1b[0m`;
+	return lines.map((line) => paint(line.padEnd(width)));
 }
 
 /**
@@ -225,13 +269,18 @@ export function attachDropdownOverlay(
 			// Read fresh every composite pass; resolveOverlayLayout re-runs after
 			// this returns, so the mutated offset applies to this very frame.
 			overlayOptions.offsetY = -(rowsBelow() + editor.lastHeight);
-			// Custom sources first (first non-empty wins), then the editor's own
-			// dropdown. `sources` is read live so callers can register/unregister.
-			for (const source of options.sources ?? []) {
-				const lines = source(width);
-				if (lines && lines.length > 0) return [...lines];
-			}
-			return [...(editorDropdownSource(editor)(width) ?? [])];
+			const band = (): readonly string[] => {
+				// Custom sources first (first non-empty wins), then the editor's own
+				// dropdown. `sources` is read live so callers can register/unregister.
+				for (const source of options.sources ?? []) {
+					const lines = source(width);
+					if (lines && lines.length > 0) return lines;
+				}
+				return editorDropdownSource(editor)(width) ?? [];
+			};
+			// Same chrome treatment as the editor block: the fuzzy/popup band gets
+			// the inputBg fill too, so the whole input layer reads as one bar.
+			return tintBand(band(), width);
 		},
 	};
 

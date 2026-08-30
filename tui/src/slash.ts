@@ -254,7 +254,7 @@ export class AidbCompletionProvider extends CombinedAutocompleteProvider {
 		this.ctx = ctx;
 	}
 
-	override async getSuggestions(
+		override async getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
@@ -271,6 +271,37 @@ export class AidbCompletionProvider extends CombinedAutocompleteProvider {
 			}
 		}
 		return super.getSuggestions(lines, cursorLine, cursorCol, options);
+	}
+
+	/**
+	 * Tab on bare (non-slash) text offers file completion only when a path is
+	 * actually expected. Stock pi-tui triggers it for ANY bare line — Tab after
+	 * `continue` or `print x` would pop up an irrelevant file list. Exceptions:
+	 *  - the program-loading verbs (`run`/`file`) take a bare basename in the
+	 *    cwd as their first argument;
+	 *  - any token already shaped like a path (@file, ./ ../ ~/, absolute, or
+	 *    containing a separator) is fair game anywhere.
+	 * Slash lines always pass through so the position-aware argument completion
+	 * above keeps working (the editor gates Tab with this hook).
+	 */
+	override shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
+		const currentLine = lines[cursorLine] ?? "";
+		const trimmed = currentLine.slice(0, cursorCol).trimStart();
+		if (trimmed.startsWith("/")) return true;
+		const tokens = trimmed.split(/\s+/).filter(Boolean);
+		const current = trimmed.endsWith(" ") ? "" : (tokens[tokens.length - 1] ?? "");
+		if (
+			current.startsWith("@") ||
+			current.startsWith("./") ||
+			current.startsWith("../") ||
+			current.startsWith("~/") ||
+			current.startsWith("/") ||
+			current.includes("/")
+		) {
+			return true;
+		}
+		const verb = tokens[0] ?? "";
+		return (verb === "run" || verb === "file") && tokens.length === 2 && current !== "";
 	}
 
 	/** Position-aware slash-argument completion; returns null when no items. */

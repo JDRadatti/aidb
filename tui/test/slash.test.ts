@@ -123,3 +123,36 @@ describe("AidbCompletionProvider slash arguments", () => {
 		assert.ok(!vals.includes("continue"));
 	});
 });
+describe("AidbCompletionProvider Tab gate (shouldTriggerFileCompletion)", () => {
+	const p = provider();
+	const trigger = (line: string): boolean => p.shouldTriggerFileCompletion([line], 0, line.length);
+
+	it("blocks Tab on bare commands where a file is not expected", () => {
+		assert.equal(trigger("continue"), false);
+		assert.equal(trigger("print x"), false);
+		assert.equal(trigger("bt"), false);
+		assert.equal(trigger(""), false);
+	});
+
+	it("allows Tab for the program-loading verbs run/file", () => {
+		assert.equal(trigger("run exa"), true);
+		assert.equal(trigger("file exa"), true);
+		// Args after the program are not paths.
+		assert.equal(trigger("run ./example --fast"), false);
+		// An empty token right after `run ` — nothing to complete yet.
+		assert.equal(trigger("run "), false);
+	});
+
+	it("allows Tab on path-shaped tokens anywhere", () => {
+		assert.equal(trigger("run ./ex"), true);
+		assert.equal(trigger("break src/main.c:12"), true);
+		assert.equal(trigger("./bin/aidb"), true);
+		assert.equal(trigger("@doc"), true);
+		assert.equal(trigger("print ~/lib"), true);
+	});
+
+	it("never gates slash lines (position-aware args ride the same Tab request)", () => {
+		assert.equal(trigger("/win"), true);
+		assert.equal(trigger("/win load "), true);
+	});
+});

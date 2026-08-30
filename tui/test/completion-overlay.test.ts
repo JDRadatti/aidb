@@ -5,8 +5,12 @@ import {
 	type Component,
 	Container,
 	Editor,
+	getKeybindings,
+	KeybindingsManager,
 	type OverlayOptions,
+	setKeybindings,
 	Text,
+	TUI_KEYBINDINGS,
 	TuiMainScreen,
 	type TUI,
 } from "@earendil-works/pi-tui";
@@ -57,6 +61,9 @@ function stubTui(rows = 24): { tui: TUI; entries: OverlayEntry[] } {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
 
+/** Plain visible text: ANSI stripped, trailing band padding trimmed. */
+const plain = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
+
 /** Drive a slash-command suggestion into `editor` and return its render. */
 async function activateAndRender(editor: Editor, stub: { tui: TUI }): Promise<string[]> {
 	editor.setAutocompleteProvider(fakeProvider());
@@ -92,7 +99,8 @@ describe("AidbEditor", () => {
 		const stockLines = stock.render(WIDTH);
 
 		assert.ok(aidb.dropdownLines);
-		assert.deepEqual([...aidbLines, ...aidb.dropdownLines], stockLines);
+		assert.deepEqual([...aidbLines, ...aidb.dropdownLines].map(plain), stockLines.map(plain));
+		assert.ok(aidbLines.join("").includes("\x1b[48;5;237m"), "the prompt band is tinted with inputBg");
 	});
 
 	it("a single Enter applies an argument completion and submits the slash command", async () => {
@@ -196,7 +204,71 @@ describe("AidbEditor", () => {
 		const aidbLines = aidb.render(WIDTH);
 		const stockLines = stock.render(WIDTH);
 		assert.equal(aidb.dropdownLines, null);
-		assert.deepEqual(aidbLines, stockLines);
+		assert.deepEqual(aidbLines.map(plain), stockLines.map(plain), "stock output (uncolored) after the dropdown closes");
+	});
+});
+
+describe("AidbEditor history recall", () => {
+	const PREV = getKeybindings();
+	// ctrl+p recall with the cursor at the END, gdb-style (upstream parks it
+	// at the start). Bound like aidb's default config.
+	function recallEditor(): { tui: { tui: TUI }; aidb: AidbEditor } {
+		const st = stubTui();
+		const aidb = new AidbEditor(st.tui, createEditorTheme());
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.editor.historyPrevious": ["ctrl+p"],
+				"tui.editor.historyNext": ["ctrl+n"],
+			}),
+		);
+		aidb.addToHistory("print foo");
+		aidb.setText("");
+		return { tui: st, aidb };
+	}
+
+	it("ctrl+p recall lands the cursor at the END of the previous command", () => {
+		const { aidb } = recallEditor();
+		try {
+			aidb.handleInput("\x10"); // ctrl+p (legacy DC2)
+			assert.equal(aidb.getText(), "print foo");
+			assert.deepEqual(aidb.getCursor(), { line: 0, col: "print foo".length });
+
+			// ctrl+n back out restores the pre-recall draft (empty prompt).
+			aidb.handleInput("\x0e"); // ctrl+n (legacy SO)
+			assert.equal(aidb.getText(), "");
+		} finally {
+			setKeybindings(PREV);
+		}
+	});
+
+	it("ArrowUp from an empty prompt recalls with the cursor at the end", () => {
+		const { aidb } = recallEditor();
+		try {
+			aidb.handleInput("\x1b[A"); // up
+			assert.equal(aidb.getText(), "print foo");
+			assert.deepEqual(aidb.getCursor(), { line: 0, col: "print foo".length });
+		} finally {
+			setKeybindings(PREV);
+		}
+	});
+
+	it("ctrl+p with an empty history leaves the prompt and cursor alone", () => {
+		const st = stubTui();
+		const aidb = new AidbEditor(st.tui, createEditorTheme());
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.editor.historyPrevious": ["ctrl+p"],
+				"tui.editor.historyNext": ["ctrl+n"],
+			}),
+		);
+		try {
+			aidb.setText("abc"); // no history seeded
+			aidb.handleInput("\x10");
+			assert.equal(aidb.getText(), "abc");
+			assert.deepEqual(aidb.getCursor(), { line: 0, col: 3 });
+		} finally {
+			setKeybindings(PREV);
+		}
 	});
 });
 
@@ -215,7 +287,7 @@ describe("attachDropdownOverlay", () => {
 		assert.deepEqual(entry.component.render(WIDTH), [], "no suggestions -> renders nothing");
 
 		await activateAndRender(editor, { tui });
-		assert.deepEqual(entry.component.render(WIDTH), [...editor.dropdownLines!]);
+		assert.deepEqual(entry.component.render(WIDTH).map(plain), [...editor.dropdownLines!].map(plain));
 		assert.equal(overlay.options.offsetY, -(rowsBelow + editor.lastHeight));
 	});
 
@@ -260,12 +332,12 @@ describe("attachDropdownOverlay", () => {
 		let pickerOpen = true;
 		sources.push((width) => (pickerOpen ? pickerBand(width) : null));
 		const band = entry.component.render(WIDTH);
-		assert.deepEqual(band, pickerBand(WIDTH), "custom source composites in place of the dropdown");
+		assert.deepEqual(band.map(plain), pickerBand(WIDTH).map(plain), "custom source composites in place of the dropdown");
 		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight), "geometry is the dropdown's own");
 
 		// Spent (picker closed): falls back to the editor's dropdown.
 		pickerOpen = false;
-		assert.deepEqual(entry.component.render(WIDTH), [...editor.dropdownLines!]);
+		assert.deepEqual(entry.component.render(WIDTH).map(plain), [...editor.dropdownLines!].map(plain));
 	});
 });
 
