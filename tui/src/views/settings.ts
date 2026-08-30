@@ -58,10 +58,10 @@ export function renderSettings(config: Config, sources: ConfigSources): string[]
 	push("");
 	section("theme");
 	const t = config.theme;
-	push(`${colors.muted("  roles:")} ${themeLine("accent", t.accent)} · ${themeLine("muted", t.muted)} · ${themeLine("success", t.success)} · ${themeLine("warning", t.warning)} · ${themeLine("error", t.error)}`);
-	push(`${colors.muted("  frame:")} ${themeLine("border", t.border)} · ${themeLine("borderActive", t.borderActive)} · ${themeLine("borderInactive", t.borderInactive)} · ${themeLine("paneBg", t.paneBg)}`);
+	push(`${colors.muted("  roles:")} ${themeLine("accent", t.accent)} · ${themeLine("muted", t.muted)} · ${themeLine("success", t.success)} · ${themeLine("warning", t.warning)} · ${themeLine("error", t.error)} · ${themeLine("placeholder", t.placeholder)}`);
+	push(`${colors.muted("  frame:")} ${themeLine("border", t.border)} · ${themeLine("borderActive", t.borderActive)} · ${themeLine("borderInactive", t.borderInactive)} · ${themeLine("paneBg", t.paneBg)} · ${themeLine("inputBorder", t.inputBorder)}`);
 	push(`${colors.muted("  tokens:")} ${themeLine("keyword", t.keyword)} · ${themeLine("string", t.string)} · ${themeLine("number", t.number)} · ${themeLine("comment", t.comment)}`);
-	push(`${colors.muted("  asm:")}    ${themeLine("mnemonic", t.mnemonic)} · ${themeLine("register", t.register)} · ${themeLine("directive", t.directive)} ${origin("theme")}`);
+	push(`${colors.muted("  asm:")}    ${themeLine("mnemonic", t.mnemonic)} · ${themeLine("register", t.register)} · ${themeLine("directive", t.directive)} · ${themeLine("function", t.function)} ${origin("theme")}`);
 
 	/* gdb */
 	push("");
@@ -92,6 +92,12 @@ export function renderSettings(config: Config, sources: ConfigSources): string[]
 	push("");
 	section("windows");
 	push(`  ${colors.muted("(reserved — parsed but not yet wired: layout presets, manifest dir, refresh policy)")} ${origin("windows")}`);
+
+	/* ui — the prompt zone frame */
+	push("");
+	section("ui");
+	push(`  promptZone ${colors.success(config.ui.promptZone)} — off | line | line+rail ${origin("ui")}`);
+
 	push("");
 	section("agent");
 	push(`  ${colors.muted("(reserved — parsed but not yet wired: tool permissions, approval gates)")} ${origin("agent")}`);

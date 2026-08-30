@@ -35,6 +35,8 @@ export interface ColorRoles {
 	bold(s: string): string;
 	/** Edge colour for borders / scrollbars. */
 	border(s: string): string;
+	/** The prompt zone's frame (divider above the band, left rail). */
+	inputBorder(s: string): string;
 	/** Focused pane outline (white). */
 	borderActive(s: string): string;
 	/** Non-focused pane outline (subtle gray). */
@@ -50,6 +52,10 @@ export interface ColorRoles {
 	mnemonic(s: string): string;
 	register(s: string): string;
 	directive(s: string): string;
+	/** Function/symbol labels in assembly columns (`<main+4>`). */
+	function(s: string): string;
+	/** Placeholder args (`<name>`) in command help / dropdown hints. */
+	placeholder(s: string): string;
 }
 
 /** Build the role set from a colour-code theme. */
@@ -62,6 +68,7 @@ export function buildColors(theme: ThemeConfig): ColorRoles {
 		error: fg(theme.error),
 		bold: (s: string) => `\x1b[1m${s}${RESET}`,
 		border: fg(theme.border),
+		inputBorder: fg(theme.inputBorder),
 		borderActive: fg(theme.borderActive),
 		borderInactive: fg(theme.borderInactive),
 		paneBg: bg(theme.paneBg),
@@ -72,6 +79,8 @@ export function buildColors(theme: ThemeConfig): ColorRoles {
 		mnemonic: fg(theme.mnemonic),
 		register: fg(theme.register),
 		directive: fg(theme.directive),
+		function: fg(theme.function),
+		placeholder: fg(theme.placeholder),
 	};
 }
 
@@ -86,6 +95,7 @@ const DEFAULT_THEME: ThemeConfig = {
 	borderActive: 255,
 	borderInactive: 234,
 	paneBg: 235,
+	inputBorder: 240,
 	keyword: 36,
 	string: 32,
 	number: 33,
@@ -93,6 +103,8 @@ const DEFAULT_THEME: ThemeConfig = {
 	mnemonic: 93,
 	register: 94,
 	directive: 96,
+	function: 95,
+	placeholder: 245,
 };
 
 /** Live role set. Reassigned by `applyTheme`; imported by value by callers. */
@@ -101,6 +113,21 @@ export const colors: ColorRoles = buildColors(DEFAULT_THEME);
 /** Swap the live colour roles in place (idempotent; used by /config reload). */
 export function applyTheme(theme: ThemeConfig): void {
 	Object.assign(colors, buildColors(theme));
+}
+
+/** The live muted run's opening escape (`\x1b[90m`), so a nested token can
+ * re-open the surrounding muted colour after its own reset. */
+const mutedOpen = colors.muted("").slice(0, -4);
+
+/**
+ * Tint `<placeholder>` tokens (e.g. `<name>`, `<idx|name>`, `<expr>`) in the
+ * lighter `placeholder` colour so they read as "you fill this in" rather than
+ * literal text. With `restoreMuted`, each tinted token re-opens the muted run
+ * that a wrapping theme (the dropdown's `description` role) applied, instead
+ * of the token's reset killing the wrap for the rest of the line.
+ */
+export function dimPlaceholders(text: string, restoreMuted = false): string {
+	return text.replace(/<[^>]+>/g, (token) => `${colors.placeholder(token)}${restoreMuted ? mutedOpen : ""}`);
 }
 
 export function createEditorTheme(theme: ThemeConfig | undefined): EditorTheme {

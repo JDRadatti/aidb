@@ -1646,14 +1646,15 @@ async function handleConfig(args: string, ctx: ReplContext): Promise<void> {
 		for (const issue of sources.issues) io.warning(`config ${issue.path}: ${issue.message}`);
 		return;
 	}
-	const { theme, gdb, sessions } = ctx.config;
+	const { theme, gdb, sessions, ui } = ctx.config;
 	const origin = (k: string) => ctx.configSources.sectionOrigin[k as keyof Config];
 	io.line("aidb config");
-	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border} borderActive=${theme.borderActive} borderInactive=${theme.borderInactive}`);
+	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border} inputBorder=${theme.inputBorder} borderActive=${theme.borderActive} borderInactive=${theme.borderInactive} placeholder=${theme.placeholder}`);
 	io.info(`  tokens     (theme): keyword=${theme.keyword} string=${theme.string} number=${theme.number} comment=${theme.comment}`);
-	io.info(`  asm        (theme): mnemonic=${theme.mnemonic} register=${theme.register} directive=${theme.directive}`);
+	io.info(`  asm        (theme): mnemonic=${theme.mnemonic} register=${theme.register} directive=${theme.directive} function=${theme.function}`);
 	io.info(`  gdb        (${origin("gdb")}): path=${gdb.path}`);
 	io.info(`  sessions   (${origin("sessions")}): history=${sessions.historyPath}`);
+	io.info(`  ui         (${origin("ui")}): promptZone=${ui.promptZone}`);
 	if (ctx.configSources.issues.length > 0) {
 		io.info("config issues:");
 		for (const issue of ctx.configSources.issues) io.warning(`  ${issue.path}: ${issue.message}`);

@@ -92,6 +92,15 @@ describe("config", () => {
 		assert.deepEqual(issues, []);
 	});
 
+	it("invalid ui.promptZone coerces to the default with an actionable issue", () => {
+		const issues: { path: string; message: string }[] = [];
+		const config = validateConfig({ ui: { promptZone: "rainbow" } }, issues);
+		assert.equal(config.ui.promptZone, DEFAULT_CONFIG.ui.promptZone);
+		assert.ok(issues.some((i) => i.path === "ui.promptZone" && /off|line/.test(i.message)));
+		assert.equal(validateConfig({ ui: { promptZone: "line" } }).ui.promptZone, "line");
+		assert.equal(validateConfig({}).ui.promptZone, DEFAULT_CONFIG.ui.promptZone);
+	});
+
 	it("readConfigFile classifies a missing file separately", () => {
 		const dir = tmpDir();
 		const missing = readConfigFile(path.join(dir, "nope.json"));

@@ -32,6 +32,8 @@ export interface ThemeConfig {
 	error: number;
 	/** Border / scrollbar edge colour. */
 	border: number;
+	/** The prompt zone's frame (divider above the band, left rail). */
+	inputBorder: number;
 	/** Focused pane outline (white). */
 	borderActive: number;
 	/** Non-focused pane outline (subtle gray). */
@@ -46,6 +48,10 @@ export interface ThemeConfig {
 	mnemonic: number;
 	register: number;
 	directive: number;
+	/** Function/symbol label colour in assembly columns. */
+	function: number;
+	/** Light colour for `<placeholder>` args in command help / hints. */
+	placeholder: number;
 }
 
 export interface GdbConfig {
@@ -82,6 +88,16 @@ export interface AgentConfig {
 	[key: string]: unknown;
 }
 
+/** How the prompt + popup zone is framed. `line` draws a divider above the
+ * popup band ("the line above the prompt is also above the popups");
+ * `line+rail` additionally draws a left rail in theme.inputBorder on the
+ * band and the prompt line. `off` keeps the chrome-less look. */
+export type PromptZone = "off" | "line" | "line+rail";
+
+export interface UiConfig {
+	promptZone: PromptZone;
+}
+
 export type ConfigIssue = { path: string; message: string };
 
 /** Actions the TUI dispatches on input; config maps these to key chords. */
@@ -111,6 +127,7 @@ export interface Config {
 	sessions: SessionsConfig;
 	windows: WindowsConfig;
 	agent: AgentConfig;
+	ui: UiConfig;
 }
 
 /* ------------------------------------------------------------ default config */
@@ -140,6 +157,7 @@ export const DEFAULT_CONFIG: Config = {
 		warning: 33,
 		error: 31,
 		border: 90,
+		inputBorder: 240,
 		borderActive: 255,
 		borderInactive: 234,
 		paneBg: 235,
@@ -150,6 +168,8 @@ export const DEFAULT_CONFIG: Config = {
 		mnemonic: 93,
 		register: 94,
 		directive: 96,
+		function: 95,
+		placeholder: 245,
 	},
 	gdb: { path: "gdb", args: [], env: {} },
 	keybindings: {
@@ -164,6 +184,7 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	windows: {},
 	agent: {},
+	ui: { promptZone: "line" },
 };
 
 /* ------------------------------------------------------------------ merge */
@@ -196,6 +217,7 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 	const defaultsRaw = section("defaults");
 	const sessionsRaw = section("sessions");
 	const keyRaw = section("keybindings");
+	const uiRaw = section("ui");
 
 	/* theme */
 	const pickColor = (key: keyof ThemeConfig, fallback: number): number => {
@@ -206,8 +228,8 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 		return fallback;
 	};
 	const themeKeys = [
-		"accent", "muted", "success", "warning", "error", "border",
-		"borderActive", "borderInactive", "paneBg", "keyword", "string", "number", "comment", "mnemonic", "register", "directive",
+		"accent", "muted", "success", "warning", "error", "border", "inputBorder",
+		"borderActive", "borderInactive", "paneBg", "keyword", "string", "number", "comment", "mnemonic", "register", "directive", "function", "placeholder",
 	] as const;
 	const theme = {} as ThemeConfig;
 	for (const key of themeKeys) {
@@ -308,7 +330,21 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 		}
 	}
 
-	return { theme, gdb, defaults, sessions, keybindings: { actions, editor }, windows: {}, agent: {} };
+	/* ui */
+	const promptZoneRaw = isPlainObject(uiRaw) ? uiRaw.promptZone : undefined;
+	const ui: UiConfig = {
+		promptZone:
+			promptZoneRaw === "off" || promptZoneRaw === "line" || promptZoneRaw === "line+rail"
+				? promptZoneRaw
+				: (() => {
+						if (promptZoneRaw !== undefined) {
+							issues.push({ path: "ui.promptZone", message: `expected "off" | "line" | "line+rail", got ${JSON.stringify(promptZoneRaw)}` });
+						}
+						return DEFAULT_CONFIG.ui.promptZone;
+					})(),
+	};
+
+	return { theme, gdb, defaults, sessions, keybindings: { actions, editor }, windows: {}, agent: {}, ui };
 }
 
 /* ---------------------------------------------------------------- loading */
