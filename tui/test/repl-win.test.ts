@@ -139,6 +139,48 @@ describe("window commands", () => {
 		assert.deepEqual(view.getEntries().map((e) => e.expr), ["i", "sum"]);
 	});
 
+	it("gdb `display <expr>` auto-creates a watch pane and pins the expression", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("display frame", ctx);
+		const view = windows.component("watch") as WatchListView | undefined;
+		assert.ok(view instanceof WatchListView, "display creates the same live watch pane as /watch");
+		assert.equal(windows.active, "repl", "creating the pane must not steal focus");
+		assert.deepEqual(view.getEntries().map((e) => e.expr), ["frame"]);
+		assert.match(messages.map((m) => m.text).join("\n"), /display 1: frame/);
+	});
+
+	it("display numbers are 1-based watch indices; info display lists, undisplay removes", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("display a", ctx);
+		assert.match(messages.at(-1)!.text, /display 1: a/);
+		await handleReplInput("display b", ctx);
+		assert.match(messages.at(-1)!.text, /display 2: b/);
+
+		await handleReplInput("info display", ctx);
+		const listed = messages.map((m) => m.text).join("\n");
+		assert.match(listed, /0\./); // watch pane env in the listing is index-based
+		assert.match(listed, /a/);
+		assert.match(listed, /b/);
+
+		await handleReplInput("undisplay 1", ctx);
+		const view = windows.component("watch") as WatchListView;
+		assert.deepEqual(view.getEntries().map((e) => e.expr), ["b"], "undisplay 1 removed the first entry");
+		assert.match(messages.at(-1)!.text, /Undisplayed 1 \(a\)/);
+	});
+
+	it("undisplay with no watchers / an out-of-range index is a guarded no-op", async () => {
+		const { ctx, messages } = makeContext();
+		await handleReplInput("undisplay 3", ctx);
+		assert.match(messages.at(-1)!.text, /Nothing to undisplay/);
+	});
+
+	it("bare `display` lists without creating a pane", async () => {
+		const { ctx, windows, messages } = makeContext();
+		await handleReplInput("display", ctx);
+		assert.deepEqual(windows.list().map((p) => p.id), ["repl"], "a bare listing never spawns a pane");
+		assert.match(messages.map((m) => m.text).join("\n"), /No watch pane yet/);
+	});
+
 	it("/watch cycle lists change the renderer of an entry", async () => {
 		const { ctx, windows, messages } = makeContext();
 		await handleReplInput("/watch i", ctx);

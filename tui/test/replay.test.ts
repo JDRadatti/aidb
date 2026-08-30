@@ -114,6 +114,18 @@ describe("canReplayCommand — the dont_repeat table", () => {
 		}
 	});
 
+	it("blocks display adds/undisplay (duplicate/renumber) but not listings", () => {
+		// `display x` re-registers an auto-display on every replay; only the
+		// bare listing form is safe to repeat. `undisplay 2` renumbers the
+		// entries so a second run would hit the wrong expression.
+		for (const line of ["display x", "display arr[0]", "display /x *p", "undisplay 1", "undisplay"]) {
+			assert.equal(canReplayCommand(line), false, line);
+		}
+		for (const line of ["display", "info display"]) {
+			assert.equal(canReplayCommand(line), true, line);
+		}
+	});
+
 	it("blocks gdb definition-mode denylist (would hang the DAP channel)", () => {
 		for (const line of ["commands 1", "define foo", "document foo", "python print(1)", "guile", "while i < 3", "if x", "layout next", "layout src", "focus cmd", "refresh", "update", "tui enable"]) {
 			assert.equal(canReplayCommand(line), false, line);

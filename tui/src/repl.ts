@@ -110,6 +110,10 @@ const HELP = [
 	"  finish                      step out (<stepOut>)",
 	"  bt                          backtrace (aliases: backtrace, where)",
 	"  print <expr>                evaluate an expression in the current frame (alias: p)",
+	"  display <expr>              re-evaluate after every stop (backed by the watch pane);",
+	"                              entry number = watch index + 1. bare `display` lists.",
+	"  info display                list auto-displays (numbers are undisplay targets)",
+	"  undisplay <n>               stop auto-displaying entry n (renumbers, unlike gdb)",
 	"  set <var> = <val>           assign in the current frame (uses `set variable` syntax)",
 	"  info locals | info args     variables and arguments of the current frame",
 	"  set disassembly-flavor intel|att   choose x86 Intel or AT&T syntax",
@@ -300,6 +304,25 @@ function findWatchView(windows: WindowManager): { id: string; view: WatchListVie
 		if (view instanceof WatchListView) return { id: pane.id, view };
 	}
 	return undefined;
+}
+
+/** Find the live watch pane, creating + mounting one when missing. Shared by
+ * `/watch <expr>` and gdb's `display`. Returns pane id + view, or the split's
+ * refusal error (both call sites give the user the /win hsplit watch path). */
+type EnsureWatchResult = { ok: true; id: string; view: WatchListView } | { ok: false; error: string };
+function ensureWatchView(ctx: ReplContext): EnsureWatchResult {
+	const found = findWatchView(ctx.windows);
+	if (found) return { ok: true, id: found.id, view: found.view };
+	const id = nextWatchId(ctx.windows);
+	const previous = ctx.windows.active;
+	const result = ctx.windows.split("v", undefined, id);
+	if (!result.ok) return { ok: false, error: result.error };
+	const createdId = result.value;
+	ctx.windows.mount(createdId, makeWatchView(ctx, createdId));
+	ctx.windows.switchTo(previous);
+	const again = findWatchView(ctx.windows);
+	if (!again) return { ok: false, error: "split did not mount the watch pane" };
+	return { ok: true, id: again.id, view: again.view };
 }
 
 /**
@@ -650,6 +673,10 @@ async function handleInfo(subcommand: string, input: string, ctx: ReplContext): 
 		case "break":
 			await printBreakpoints(api, io);
 			break;
+		case "display":
+			// gdb `info display` lists the auto-displays (watch-pane entries).
+			await handleWatch("list", ctx);
+			break;
 		default:
 			await passthrough(input, ctx);
 	}
@@ -729,6 +756,14 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 		case "backtrace":
 		case "print":
 			await passthrough(input, ctx);
+			break;
+
+		case "display":
+			await handleDisplay(args, ctx);
+			break;
+
+		case "undisplay":
+			await handleUndisplay(args, ctx);
 			break;
 
 		case "set":
@@ -993,17 +1028,13 @@ async function handleWatch(args: string, ctx: ReplContext): Promise<void> {
 	}
 
 	if (!found) {
-		const id = nextWatchId(ctx.windows);
-		const previous = ctx.windows.active;
-		const result = ctx.windows.split("v", undefined, id);
-		if (!result.ok) {
-			io.error(`${result.error} — create a pane first: /win hsplit watch`);
+		const created = ensureWatchView(ctx);
+		if (!created.ok) {
+			io.error(`${created.error} — create a pane first: /win hsplit watch`);
 			return;
 		}
-		ctx.windows.mount(result.value, makeWatchView(ctx, result.value));
-		ctx.windows.switchTo(previous);
-		found = findWatchView(ctx.windows);
-		io.info(`Created live watch pane '${id}'.`);
+		found = created;
+		io.info(`Created live watch pane '${created.id}'.`);
 	}
 	if (!found) return;
 	const view = found.view;
@@ -1056,6 +1087,63 @@ async function handleWatch(args: string, ctx: ReplContext): Promise<void> {
 	view.add(sub);
 	ctx.requestRender();
 	io.success(`Watching ${sub}.`);
+}
+
+/**
+ * gdb `display` — re-evaluate an expression after EVERY stop. Backed by the
+ * watch pane: entries re-fetch on each stop (refreshLivePanes is "the
+ * equivalent of gdb refreshing display expressions"), so `display x` is
+ * "watch x forever". Numbering is the watch entry index + 1 (undisplay
+ * renumbers, unlike gdb's persistent slots — noted in help).
+ * gdb format displays (`display /x *p`) can't be represented in the pane;
+ * they pass through to gdb's own display list.
+ */
+async function handleDisplay(args: string, ctx: ReplContext): Promise<void> {
+	const io = ctx.io;
+	const expr = args.trim();
+	if (expr === "") {
+		// bare `display` lists the auto-displays (gdb parity).
+		await handleWatch("list", ctx);
+		return;
+	}
+	if (expr.startsWith("/")) {
+		await passthrough(`display ${args.trim()}`, ctx);
+		return;
+	}
+	const created = ensureWatchView(ctx);
+	if (!created.ok) {
+		io.error(`${created.error} — create a pane first: /win hsplit watch`);
+		return;
+	}
+	created.view.add(expr);
+	ctx.requestRender();
+	io.success(`display ${created.view.getEntries().length}: ${expr} — re-evaluated on every stop.`);
+}
+
+/** gdb `undisplay <n>` — stop auto-displaying entry n (1-based, gdb-style). */
+async function handleUndisplay(args: string, ctx: ReplContext): Promise<void> {
+	const io = ctx.io;
+	const n = resolveIndex(args.trim());
+	if (n === undefined || n < 1) {
+		io.error("Usage: undisplay <n> — a display index (info display lists them)");
+		return;
+	}
+	const found = findWatchView(ctx.windows);
+	if (!found) {
+		io.info("Nothing to undisplay — no watchers.");
+		return;
+	}
+	const view = found.view;
+	// Display numbers are 1-based watch indices (gdb-style): entry n-1.
+	const index = n - 1;
+	if (index >= view.getEntries().length) {
+		io.error(`No display ${n}. info display lists them.`);
+		return;
+	}
+	const expr = view.getEntries()[index]!.expr;
+	view.removeAt(index);
+	ctx.requestRender();
+	io.success(`Undisplayed ${n} (${expr}).`);
 }
 
 /**
@@ -1707,6 +1795,14 @@ export function canReplayCommand(input: string): boolean {
 		// listing forms (bare or `list`) are pure reads and repeat.
 		case "/watch":
 			return sub === undefined || sub === "list";
+
+		// gdb `display <expr>` registers a NEW auto-display every run — never
+		// repeat an add. The bare listing form repeats; `undisplay <n>`
+		// renumbers entries so a second run would hit the wrong one.
+		case "display":
+			return sub === undefined;
+		case "undisplay":
+			return false;
 
 		// Named profile switches are one-shot "move the whole world" verbs:
 		// re-applying a layout rebuilds the pane tree (wiping any tweaks made
