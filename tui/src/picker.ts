@@ -11,11 +11,13 @@
  *
  * The filter itself lives in the REAL prompt, cursor-style: the moment the
  * finder opens the prompt reads `> ` (a `>` prefix replacing the normal
- * command line) and grows to `> <query>` as you type, with the block cursor
- * after the text. Typing appends, backspace shrinks, Enter picks, Esc
- * restores the empty prompt and closes the finder. A pasted/recalled
- * command line `> <query>` seeds the filter up front via `initialFilter`
- * (the live-typed `>` is handled by main.ts's global listener).
+ * command line) and grows to `> <query>` as you type, with a readline caret
+ * inside the query (ctrl+a/e/b/f/w/u/k/y + yank all work — the block cursor
+ * tracks the caret via `setPromptCaret`). Typing inserts at the caret,
+ * backspace shrinks, Enter picks, Esc restores the empty prompt and closes
+ * the finder. A pasted/recalled command line `> <query>` seeds the filter up
+ * front via `initialFilter` (the live-typed `>` is handled by main.ts's
+ * global listener).
  *
  * Create + delete add two affordances on top of the plain picker:
  *  - with `onCreate`, a `+ create … <query>` row is appended whenever the
@@ -98,14 +100,18 @@ export interface PickerHost {
 	 * restore the empty prompt on close.
 	 */
 	setPromptText(text: string): void;
+	/** Move the prompt cursor to an absolute column (readline ctrl+a etc.). */
+	setPromptCaret?(col: number): void;
 }
 
 /** Prompt prefix shown while the finder is open (`>` prompt, cursor-style). */
 const PROMPT_PREFIX = "> ";
 
-/** Push the current filter into the real prompt as `> <query>` (`> ` when empty). */
-function syncPrompt(text: string): void {
+/** Push the current filter into the real prompt as `> <query>` (`> ` when empty).
+ * The caret sits after `caret` filter characters (readline editing). */
+function syncPrompt(text: string, caret = text.length): void {
 	host?.setPromptText(PROMPT_PREFIX + text);
+	host?.setPromptCaret?.(PROMPT_PREFIX.length + caret);
 }
 
 let host: PickerHost | null = null;
@@ -217,6 +223,48 @@ function isFilterChar(data: string): boolean {
 	return data.length === 1 && /^[\p{L}\p{N}_\-./]$/u.test(data);
 }
 
+/** Word characters for readline word-moves (alnum + underscore). */
+function isWordChar(ch: string): boolean {
+	return /[\p{L}\p{N}_]/u.test(ch);
+}
+
+/** Cursor position at the start of the word before `pos` (readline alt+b/ctrl+left). */
+function wordStartAt(text: string, pos: number): number {
+	let p = Math.min(pos, text.length);
+	while (p > 0 && !isWordChar(text[p - 1]!)) p--;
+	while (p > 0 && isWordChar(text[p - 1]!)) p--;
+	return p;
+}
+
+/** Cursor position at the end of the word after `pos` (readline alt+f/ctrl+right). */
+function wordEndAt(text: string, pos: number): number {
+	let p = Math.max(0, pos);
+	while (p < text.length && !isWordChar(text[p]!)) p++;
+	while (p < text.length && isWordChar(text[p]!)) p++;
+	return p;
+}
+
+/**
+ * Start of the kill region for ctrl+w: from `pos`, back over the word AND the
+ * whitespace before it, so a readline-style kill takes both (bash: `a b` +
+ * ctrl+w → `a`, not `a `).
+ */
+function killBackStartAt(text: string, pos: number): number {
+	let p = Math.min(pos, text.length);
+	while (p > 0 && isWordChar(text[p - 1]!)) p--;
+	while (p > 0 && !isWordChar(text[p - 1]!)) p--;
+	return p;
+}
+
+/** End of the kill region for alt+d: from `pos`, forward over the word and the
+ * whitespace after it (readline kill-word parity). */
+function killForwardEndAt(text: string, pos: number): number {
+	let p = Math.max(0, pos);
+	while (p < text.length && isWordChar(text[p]!)) p++;
+	while (p < text.length && !isWordChar(text[p]!)) p++;
+	return p;
+}
+
 /**
  * The picker's contribution to the shared prompt-overlay band: the narrowed
  * SelectList rows (the query lives in the prompt itself, not the band) plus a
@@ -267,7 +315,10 @@ export function openPicker(options: PickerOptions): void {
 	// A pasted/recalled `> <query>` line seeds the filter up front.
 	// Restored to "" on close.
 	let filter = options.initialFilter ?? "";
-	syncPrompt(filter);
+	let caret = filter.length;
+	/** Last killed text (ctrl+u/k/w), yanked back with ctrl+y. */
+	let killed = "";
+	syncPrompt(filter, caret);
 	let confirmTarget: PickerItem | null = null;
 	let built = buildList(options.items, filter, options);
 	let list = built.list;
@@ -285,6 +336,7 @@ export function openPicker(options: PickerOptions): void {
 		removeListener();
 		renderCurrent = null;
 		host?.setPromptText("");
+		host?.setPromptCaret?.(0);
 		host?.requestRender();
 		if (kind === "pick" && item) options.onPick(item);
 		else if (kind === "create" && options.onCreate) options.onCreate(filter);
@@ -324,16 +376,6 @@ export function openPicker(options: PickerOptions): void {
 			return { consume: true };
 		}
 
-		if (matchesKey(data, "ctrl+d") && options.onDelete) {
-			const item = list.getSelectedItem();
-			// The create row isn't a real item — nothing to delete.
-			if (item && item.value !== CREATE_VALUE) {
-				confirmTarget = item;
-				host?.requestRender();
-			}
-			return { consume: true };
-		}
-
 		if (matchesKey(data, "ctrl+r") && options.onRename) {
 			const item = list.getSelectedItem();
 			if (item && item.value !== CREATE_VALUE && filter.length > 0) {
@@ -342,13 +384,142 @@ export function openPicker(options: PickerOptions): void {
 			return { consume: true };
 		}
 
-		if (matchesKey(data, "backspace")) {
-			filter = filter.slice(0, -1);
+		// ---- caret-aware filter editing (readline keys: ctrl+a/e/b/f/w/u/k/y) ----
+		// The editor's bindings drive a caret that moves INSIDE the query; the
+		// block cursor in the real prompt follows it via setPromptCaret. Every
+		// mutation rebuilds the narrowed list + prompt at once.
+		const rebuildFilter = (next: string, nextCaret: number): void => {
+			filter = next;
+			caret = nextCaret;
 			built = buildList(options.items, filter, options);
 			list = built.list;
 			createLabelText = built.createLabelText;
-			syncPrompt(filter);
+			syncPrompt(filter, caret);
 			host?.requestRender();
+		};
+
+		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
+			// backspace — delete the char before the caret.
+			if (caret > 0) rebuildFilter(filter.slice(0, caret - 1) + filter.slice(caret), caret - 1);
+			return { consume: true };
+		}
+		// ctrl+d conflicts with the picker's item-delete affordance: readline
+		// parity says ctrl+d forward-deletes a char, but at the tail of the
+		// query there IS no char — that's where the item-delete confirm lives.
+		// The Delete key forward-deletes unconditionally (never item-delete).
+		const isCtrlD = matchesKey(data, "ctrl+d");
+		if (isCtrlD && options.onDelete && caret === filter.length) {
+			const item = list.getSelectedItem();
+			// The create row isn't a real item — nothing to delete.
+			if (item && item.value !== CREATE_VALUE) {
+				confirmTarget = item;
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.deleteCharForward")) {
+			// ctrl+d mid-query (or Delete) — delete the char under the caret.
+			if (caret < filter.length) rebuildFilter(filter.slice(0, caret) + filter.slice(caret + 1), caret);
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorLineStart")) {
+			// ctrl+a / home — front of the query.
+			if (caret !== 0) {
+				caret = 0;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
+			// ctrl+e / end — back of the query.
+			if (caret !== filter.length) {
+				caret = filter.length;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorLeft")) {
+			// ctrl+b / left — one char back.
+			if (caret > 0) {
+				caret -= 1;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorRight")) {
+			// ctrl+f / right — one char forward.
+			if (caret < filter.length) {
+				caret += 1;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
+			// alt+b / ctrl+left / alt+left — back to the previous word start.
+			const target = wordStartAt(filter, caret);
+			if (target !== caret) {
+				caret = target;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.cursorWordRight")) {
+			// alt+f / ctrl+right / alt+right — forward to the next word end.
+			const target = wordEndAt(filter, caret);
+			if (target !== caret) {
+				caret = target;
+				syncPrompt(filter, caret);
+				host?.requestRender();
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.deleteWordBackward")) {
+			// ctrl+w — kill the word before the caret into the kill ring
+			// (readline takes the preceding whitespace too).
+			const start = killBackStartAt(filter, caret);
+			if (start !== caret) {
+				killed = filter.slice(start, caret);
+				rebuildFilter(filter.slice(0, start) + filter.slice(caret), start);
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.deleteWordForward")) {
+			// alt+d / alt+delete — kill the word after the caret into the ring
+			// (readline takes the following whitespace too).
+			const end = killForwardEndAt(filter, caret);
+			if (end !== caret) {
+				killed = filter.slice(caret, end);
+				rebuildFilter(filter.slice(0, caret) + filter.slice(end), caret);
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.deleteToLineStart")) {
+			// ctrl+u — kill from the line start to the caret (the whole query
+			// when the caret is at the end, which is the usual case).
+			if (caret > 0) {
+				killed = filter.slice(0, caret);
+				rebuildFilter(filter.slice(caret), 0);
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.deleteToLineEnd")) {
+			// ctrl+k — kill from the caret to the line end.
+			if (caret < filter.length) {
+				killed = filter.slice(caret);
+				rebuildFilter(filter.slice(0, caret), caret);
+			}
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.editor.yank")) {
+			// ctrl+y — paste the last kill at the caret.
+			if (killed) {
+				rebuildFilter(filter.slice(0, caret) + killed + filter.slice(caret), caret + killed.length);
+			}
 			return { consume: true };
 		}
 
@@ -376,14 +547,11 @@ export function openPicker(options: PickerOptions): void {
 			return { consume: true };
 		}
 		if (isFilterChar(data)) {
-			// Keep the raw case — the create row shows exactly what the user
-			// typed; fuzzyFilter matches case-insensitively regardless.
-			filter += data;
-			built = buildList(options.items, filter, options);
-			list = built.list;
-			createLabelText = built.createLabelText;
-			syncPrompt(filter);
-			host?.requestRender();
+			// Insert at the caret (default: end, so plain typing behaves exactly
+			// as before — but after ctrl+a/b/f the char lands mid-query). Keeps
+			// the raw case — the create row shows exactly what the user typed;
+			// fuzzyFilter matches case-insensitively regardless.
+			rebuildFilter(filter.slice(0, caret) + data + filter.slice(caret), caret + 1);
 			return { consume: true };
 		}
 		// Block everything else while open so the editor never sees the key.

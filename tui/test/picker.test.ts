@@ -17,6 +17,8 @@ interface Harness {
 	rendered(width?: number): string[];
 	/** The prompt text driven while the finder is open (`> <query>`), or "" when closed. */
 	get prompt(): string;
+	/** The caret column within the prompt text (readline ctrl+a/e/b/f moves it). */
+	get caret(): number;
 	send(data: string): void;
 	picked: PickerItem | null;
 	cancelled: boolean;
@@ -38,11 +40,15 @@ interface HarnessOpts {
 function harness(items: PickerItem[], opts: HarnessOpts = {}): Harness {
 	let listener: TuiInputListener | null = null;
 	let prompt = "";
+	let caret = 0;
 	const state: Harness = {
 		created: [],
 		deleted: [],
 		get prompt() {
 			return prompt;
+		},
+		get caret() {
+			return caret;
 		},
 		rendered: (width = 50) => pickerLineSource(width) ?? [],
 		send: (data) => listener?.(data),
@@ -59,6 +65,9 @@ function harness(items: PickerItem[], opts: HarnessOpts = {}): Harness {
 		requestRender: () => {},
 		setPromptText: (text) => {
 			prompt = text;
+		},
+		setPromptCaret: (col) => {
+			caret = col;
 		},
 	};
 	installPickerHost(host);
@@ -267,6 +276,184 @@ describe("openPicker", () => {
 /* ------------------------------------------------ create + delete affordances ---- */
 
 const CTRL_D = "\x04";
+const CTRL_U = "\x15";
+const CTRL_K = "\x0b";
+const CTRL_A = "\x01";
+const CTRL_E = "\x05";
+const CTRL_B = "\x02";
+const CTRL_F = "\x06";
+const CTRL_W = "\x17";
+const CTRL_Y = "\x19";
+const HOME = "\x1b[H";
+const END = "\x1b[F";
+const LEFT = "\x1b[D";
+const RIGHT = "\x1b[C";
+const DELETE = "\x1b[3~";
+
+/* --------------------------------------------- filter editing shortcuts ---- */
+
+describe("openPicker filter editing", () => {
+	it("ctrl+u clears the whole query at once (kill-to-line-start)", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("b");
+		h.send("u");
+		assert.equal(h.prompt, "> bu");
+		h.send(CTRL_U);
+		assert.equal(h.prompt, "> ", "ctrl+u empties the query");
+		const lines = h.rendered().join("\n");
+		assert.ok(lines.includes("bug1"), "the list re-narrows back to every item");
+		assert.ok(pickerActive(), "ctrl+u does not close the finder");
+	});
+
+	it("ctrl+u on an empty query is a no-op that keeps the finder open", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send(CTRL_U);
+		assert.ok(pickerActive());
+		assert.equal(h.prompt, "> ");
+	});
+
+	it("ctrl+u un-blocks a seed filter exactly like repeated backspaces", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS, { initialFilter: "memleak" });
+		h.send(CTRL_U);
+		assert.equal(h.prompt, "> ");
+		assert.ok(h.rendered().join("\n").includes("bug1"), "the full collection is back");
+	});
+
+	it("ctrl+a / home move the caret to the front; ctrl+e / end to the back", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("m");
+		h.send("e");
+		assert.equal(h.caret, 4, "caret sits after `> ` + the query");
+		h.send(CTRL_A);
+		assert.equal(h.caret, 2, "ctrl+a jumps to the front (after the `> ` prefix)");
+		h.send(CTRL_E);
+		assert.equal(h.caret, 4, "ctrl+e jumps back to the end");
+		h.send(HOME);
+		assert.equal(h.caret, 2, "home does the same as ctrl+a");
+		h.send(END);
+		assert.equal(h.caret, 4, "end does the same as ctrl+e");
+		h.send(ENTER);
+		assert.equal(h.picked?.value, "memleak", "still picks after the caret moves");
+	});
+
+	it("typing after ctrl+a inserts at the front of the query", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("m");
+		h.send("e");
+		h.send(CTRL_A);
+		h.send("x");
+		assert.equal(h.prompt, "> xme", "the char lands before the existing text");
+		assert.equal(h.caret, 3);
+	});
+
+	it("ctrl+b / left and ctrl+f / right move the caret by one char", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("m");
+		h.send("e");
+		h.send(CTRL_B);
+		assert.equal(h.caret, 3, "ctrl+b steps back from the end");
+		h.send(CTRL_F);
+		assert.equal(h.caret, 4, "ctrl+f steps forward again");
+		h.send(LEFT);
+		assert.equal(h.caret, 3, "left arrow matches ctrl+b");
+		h.send(RIGHT);
+		assert.equal(h.caret, 4, "right arrow matches ctrl+f");
+		h.send(CTRL_B); // no-op at the front
+		h.send(CTRL_A);
+		h.send(CTRL_B);
+		assert.equal(h.caret, 2, "ctrl+b at the front is a no-op");
+	});
+
+	it("backspace deletes before the caret, Delete/ctrl+d delete after it", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("a");
+		h.send("b");
+		assert.equal(h.prompt, "> ab");
+		h.send(CTRL_B); // caret between a and b
+		h.send(DELETE);
+		assert.equal(h.prompt, "> a", "Delete removes the char under the caret");
+		h.send(CTRL_B);
+		h.send(CTRL_D);
+		assert.equal(h.prompt, "> ", "ctrl+d removes the char under the caret too");
+	});
+
+	it("ctrl+d at the end of the query still means item-delete, not forward-delete", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS, { createLabel: () => "x", delete: true });
+		h.send("b");
+		h.send("u");
+		h.send("g");
+		h.send("1");
+		h.send(CTRL_D); // caret at the tail: item-delete confirm
+		assert.ok(h.rendered().join("\n").includes('delete "'));
+		h.send("\x1b"); // Esc backs out
+		h.send(CTRL_A);
+		h.send(CTRL_D); // caret mid-query: forward-delete
+		assert.equal(h.prompt, "> ug1", "mid-query ctrl+d is a character delete, not item-delete");
+	});
+
+	it("ctrl+w kills the word before the caret (from the front it is a no-op)", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("a");
+		h.send("-");
+		h.send("b");
+		// `a-b`: caret after 'b'; ctrl+w at the end kills '-b' (word + separator).
+		h.send(CTRL_W);
+		assert.equal(h.prompt, "> a", "first ctrl+w kills the last word and its separator");
+		h.send(CTRL_W);
+		assert.equal(h.prompt, "> ", "second ctrl+w kills the remaining word");
+		h.send("x");
+		h.send(CTRL_A);
+		h.send(CTRL_W);
+		assert.equal(h.prompt, "> x", "ctrl+w at the front is a no-op");
+	});
+
+	it("ctrl+k from mid-line kills to the line end (readline parity)", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("a");
+		h.send("b");
+		h.send(CTRL_B);
+		h.send(CTRL_K);
+		assert.equal(h.prompt, "> a", "ctrl+k deletes from the caret to the end");
+		h.send(CTRL_U);
+		assert.equal(h.prompt, "> ", "ctrl+u deletes from the start to the caret");
+	});
+
+	it("ctrl+y yanks the last kill back at the caret", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS);
+		h.send("a");
+		h.send("b");
+		h.send(CTRL_U); // kill "ab"
+		assert.equal(h.prompt, "> ");
+		h.send("x");
+		h.send(CTRL_A);
+		h.send(CTRL_Y);
+		assert.equal(h.prompt, "> abx", "ctrl+y pastes the killed text at the caret");
+	});
+
+	it("word moves: alt+b jumps to the previous word start, alt+f to the next end", () => {
+		installPickerHost(null);
+		const h = harness(SESSIONS, { initialFilter: "a b c" });
+		assert.equal(h.caret, 7, "seeded filter puts the caret at the end");
+		h.send("\x1bb"); // alt+b — back over 'c'
+		assert.equal(h.caret, 6, "alt+b lands at the start of 'c' (prompt columns)");
+		h.send("\x1bb");
+		assert.equal(h.caret, 4, "alt+b again lands at the start of 'b'");
+		h.send("\x1bf"); // alt+f
+		assert.equal(h.caret, 5, "alt+f lands at the end of 'b'");
+	});
+});
+
 
 describe("openPicker create row", () => {
 	it("shows a + create row when the filter matches nothing saved", () => {
