@@ -162,6 +162,25 @@ describe("openPicker", () => {
 		assert.ok(!lines.includes("session"), "plain 'session' has no 'me' — only the escape code does");
 	});
 
+	it("matches the `search` override, not the decorated label (a group tag can't fake-match)", () => {
+		installPickerHost(null);
+		// /open's shape: the label wears a muted group tag, the search text is
+		// the raw name (item.search). The tag "target" contains an 'e', so an
+		// 'e' query must NOT keep 'foo' via the tag — only names with an 'e'
+		// survive.
+		const items: PickerItem[] = [
+			{ value: "example", label: "\x1b[90msession\x1b[0m  example", search: "example" },
+			{ value: "example2", label: "\x1b[90msession\x1b[0m  example2", search: "example2" },
+			{ value: "foo", label: "\x1b[90mtarget\x1b[0m  foo", search: "foo" },
+		];
+		const h = harness(items);
+		h.send("e");
+		const lines = h.rendered().map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+		assert.ok(lines[0]!.includes("example"), "word-boundary name match ranks the examples first");
+		assert.ok(lines.join("\n").includes("example2"), "both 'example' rows survive — 'e' is in the name");
+		assert.ok(!lines.join("\n").includes("foo"), "'foo' is gone — the 'e' in the 'target' tag must not match");
+	});
+
 	it("Esc always closes the finder and clears the prompt", () => {
 		installPickerHost(null);
 		const h = harness(SESSIONS);
@@ -805,6 +824,30 @@ function makeReplCtx(seed: ReturnType<typeof seeded>): { ctx: ReplContext; messa
 			assert.ok(!pickerActive());
 			assert.deepEqual(seed.restoreSpy, ["memleak"], "Enter restores the right session");
 			assert.ok(messages.some((m) => m.includes("›") && m.includes("/open memleak")));
+		});
+
+		it("> e narrows by NAME across collections (the two 'example' rows; tags don't fake-match)", async () => {
+			installPickerHost(null);
+			const host = fakeHost();
+			// The exact report: a session and a target both named "example", plus
+			// names with no 'e' whose GROUP TAG ('session'/'target') does contain
+			// one — the tag's 'e' must not keep them on screen.
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aidb-picker-"));
+			const stores = createStores(path.join(dir, "sessions"));
+			await stores.targets.save({ schemaVersion: TARGET_SCHEMA_VERSION, name: "example", kind: "launch", program: "./example", args: [], savedAt: Date.now() });
+			await stores.targets.save({ schemaVersion: TARGET_SCHEMA_VERSION, name: "zzz", kind: "launch", program: "./zzz", args: [], savedAt: Date.now() });
+			await stores.layouts.save({ schemaVersion: LAYOUT_SCHEMA_VERSION, name: "code-watch", splitTree: { root: "repl", active: "repl" }, watchPanes: {}, savedAt: Date.now() });
+			await stores.sessions.save({ schemaVersion: SESSION_SCHEMA_VERSION, name: "example", target: "example", layout: "code-watch", breakPoints: [], savedAt: Date.now() });
+			await stores.sessions.save({ schemaVersion: SESSION_SCHEMA_VERSION, name: "zzz", target: "example", layout: "code-watch", breakPoints: [], savedAt: Date.now() });
+			const { ctx } = makeReplCtx({ stores, restoreSpy: [] });
+			await handleReplInput("> e", ctx);
+			assert.ok(pickerActive());
+			const lines = host.rendered().map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+			assert.equal(lines.filter((l) => l.includes("example")).length, 2, "both 'example' rows surface (session + target)");
+			assert.ok(lines[0]!.includes("example"), "name matches rank first");
+			assert.ok(!lines.join("\n").includes("zzz"), "'zzz' has no 'e' — neither its name nor its 'target'/'session' tag matches");
+			host.send("\r");
+			assert.ok(!pickerActive());
 		});
 
 		it("bare `>` opens the finder with an empty prompt", async () => {

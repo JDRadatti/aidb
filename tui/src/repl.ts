@@ -1268,6 +1268,7 @@ const SESSIONS_SPEC: CollectionSpec = {
 		const current = hooks.activeName();
 		return hooks.list().map((s) => ({
 			value: s.name,
+			search: s.name,
 			label: `${s.name}${current === s.name ? " ✳" : ""}`,
 			description: `${s.target ?? "no target"} · ${s.layout ?? "no layout"} · bp ${s.breakpoints} · ${relativeTime(s.savedAt ?? Date.now())}`,
 		}));
@@ -1291,6 +1292,7 @@ const TARGETS_SPEC: CollectionSpec = {
 		const current = hooks.targets.current();
 		return hooks.targets.list().map((t) => ({
 			value: t.name,
+			search: t.name,
 			label: `${t.name}${current === t.name ? " ✳" : ""}`,
 			description: `${t.kind === "launch" ? (t.program ?? "?") : `attach pid ${t.pid}`}${t.args.length ? ` ${t.args.join(" ")}` : ""}`,
 		}));
@@ -1391,6 +1393,7 @@ const LAYOUTS_SPEC: CollectionSpec = {
 		const current = hooksApi.layouts.current();
 		return hooksApi.layouts.list().map((l) => ({
 			value: l.name,
+			search: l.name,
 			label: `${l.name}${current === l.name ? " ✳" : ""}`,
 			description: `${l.panes} pane(s) · ${l.watchEntries} watch${l.livePaneCount ? ` · ${l.livePaneCount} live` : ""}`,
 		}));
@@ -1442,8 +1445,11 @@ function openPanePicker(ctx: ReplContext): void {
 /**
  * `/open` — one combined finder over sessions · layouts · targets. A single
  * fuzzy pass across all three saved collections; Enter opens the right one.
- * Items are tagged with their group in the label so typing a kind still
- * narrows (`/open se`, `/open mem`).
+ * Items are tagged with their group in the LABEL only (visual); the picker
+ * fuzzy-matches the raw NAME (`search`), so `e` surfaces the two "example"
+ * entries instead of every row whose group tag happens to contain an 'e'.
+ * Group tags keep the collections scannable at a glance — narrowing is done
+ * by name (`/open mem` → memleak).
  *
  * Also the destination of a leading `>` on the prompt — main.ts opens it
  * live on the first keystroke; a pasted/recalled `> <query>` line arrives

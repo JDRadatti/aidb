@@ -39,8 +39,9 @@
  *    narrowed items are drawn in the band — the query itself is the prompt
  *    (`host.setPromptText`), so there is no filter row in the overlay.
  *  - `SelectList.setFilter` is prefix-only, so we pre-filter with
- *    `fuzzyFilter` over "value label description" and rebuild the list each
- *    keystroke; SelectList handles selection keys and rendering.
+ *    `fuzzyFilter` over the item's search text (label by default) and
+ *    rebuild the list each keystroke; SelectList handles selection keys and
+ *    rendering.
  */
 
 import {
@@ -57,6 +58,16 @@ export interface PickerItem {
 	value: string;
 	label: string;
 	description?: string;
+	/**
+	 * Fuzzy-match text, when it differs from the label. Labels may carry
+	 * decoration — a `/open` group tag (`session  example`), a pane index, a
+	 * "current" mark — and decoration letters can fake-match a query: the tag
+	 * `target` alone would make `e` match every single row. Callers whose
+	 * labels are decorated set this to the RAW NAME (plus anything else the
+	 * user should be able to type); matching falls back to the label when
+	 * absent.
+	 */
+	search?: string;
 }
 
 export interface PickerOptions {
@@ -188,12 +199,16 @@ interface BuiltList {
  * overwrite of an existing profile by renaming onto it.
  */
 function buildList(items: PickerItem[], filter: string, options: PickerOptions): BuiltList {
-	// Search the plain label: labels may carry ANSI color (e.g. /open's group
-	// tags) and SGR codes end in a literal 'm', so a query like "mem" would
-	// match the escape sequences themselves and return everything. Strip the
-	// codes for matching; the rendered rows keep their colors.
-	const plainLabel = (item: PickerItem) => item.label.replace(/\x1b\[[0-9;]*m/g, "");
-	const filtered = filter ? fuzzyFilter(items, filter, plainLabel) : items;
+	// Search the item's `search` text (defaulting to the label): callers set
+	// `search` to the raw name when the label carries decoration (a /open
+	// group tag, a pane index, a "current" mark). Two traps kept out of the
+	// match text: SGR codes end in a literal 'm' (a query like "mem" would
+	// match the escape sequences themselves and return everything), and a
+	// group tag like "target" contains enough letters that a one-key query
+	// ("e") would match every tagged row instead of narrowing by name.
+	// Strip the codes for matching; the rendered rows keep their colors.
+	const searchText = (item: PickerItem) => (item.search ?? item.label).replace(/\x1b\[[0-9;]*m/g, "");
+	const filtered = filter ? fuzzyFilter(items, filter, searchText) : items;
 	const exactMatch =
 		filter.length > 0 && items.some((item) => item.value.toLowerCase() === filter.toLowerCase());
 	const showCreate = options.onCreate !== undefined && filter.length > 0 && !exactMatch;
