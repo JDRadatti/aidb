@@ -62,6 +62,25 @@ function fuzzyItems<T extends AutocompleteItem>(
 		.map((x) => x.item);
 }
 
+/**
+ * Save-subcommand completions: existing profiles are offered ONLY on an exact
+ * (case-insensitive) name match, so Enter can never coerce a fresh name into
+ * a fuzzy-similar saved one (`/layout save asm` creates "asm" — it must not
+ * retarget a saved "iasm"). An empty token offers only the active profile —
+ * the `/layout save <Tab>` update path — because bare `save` overwrites the
+ * active one and every other listing would be a guess. Anything else returns
+ * nothing, so no dropdown opens and Enter submits the literal line.
+ */
+export function exactSaveItems(
+	names: AutocompleteItem[],
+	current: string,
+	active: string | null,
+): AutocompleteItem[] {
+	if (!current) return active ? names.filter((n) => n.value === active) : [];
+	const lower = current.toLowerCase();
+	return names.filter((n) => n.value.toLowerCase() === lower);
+}
+
 // ---------- pane & visualizer sources ----------
 
 function paneItems(ctx: ReplContext, current: string): AutocompleteItem[] {
@@ -146,7 +165,7 @@ function winCompletion(ctx: ReplContext, tokens: string[], pos: number, current:
 function sessionCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
 	if (pos === 0) return sessionNameItems(ctx, current);
 	const first = tokens[0];
-	if (first === "save") return sessionNameItems(ctx, current);
+	if (first === "save") return exactSaveItems(sessionItems(ctx), current, ctx.sessions?.activeName() ?? null);
 	return null;
 }
 
@@ -155,18 +174,22 @@ function sessionCompletion(ctx: ReplContext, tokens: string[], pos: number, curr
 function targetCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
 	if (pos === 0) return targetNameItems(ctx, current);
 	const first = tokens[0];
-	if (first === "save") return targetNameItems(ctx, current);
+	if (first === "save") return exactSaveItems(targetItems(ctx), current, ctx.sessions?.targets.current() ?? null);
 	return null;
 }
 
-/** Saved target profile names (for `/target switch <name>` etc.). */
-function targetNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
-	const items = (ctx.sessions?.targets.list() ?? []).map((t) => ({
+/** All saved target profile items (unfiltered) — exact-save completion must see every name. */
+function targetItems(ctx: ReplContext): AutocompleteItem[] {
+	return (ctx.sessions?.targets.list() ?? []).map((t) => ({
 		value: t.name,
 		label: t.name,
 		description: `${t.program ?? (t.kind === "attach" ? `attach pid ${t.pid}` : "")}${t.args.length ? `  ${t.args.join(" ")}` : ""}`.trim(),
 	}));
-	return fuzzyItems(items, current);
+}
+
+/** Saved target profile names (for `/target switch <name>` etc.). */
+function targetNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	return fuzzyItems(targetItems(ctx), current);
 }
 
 /** `/layout` — subcommands (no free-form first token). */
@@ -174,28 +197,36 @@ function targetNameItems(ctx: ReplContext, current: string): AutocompleteItem[] 
 function layoutCompletion(ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
 	if (pos === 0) return layoutNameItems(ctx, current);
 	const first = tokens[0];
-	if (first === "save") return layoutNameItems(ctx, current);
+	if (first === "save") return exactSaveItems(layoutItems(ctx), current, ctx.sessions?.layouts.current() ?? null);
 	return null;
 }
 
-/** Saved layout profile names (for `/layout switch <name>` etc.). */
-function layoutNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
-	const items = (ctx.sessions?.layouts.list() ?? []).map((l) => ({
+/** All saved layout profile items (unfiltered) — exact-save completion must see every name. */
+function layoutItems(ctx: ReplContext): AutocompleteItem[] {
+	return (ctx.sessions?.layouts.list() ?? []).map((l) => ({
 		value: l.name,
 		label: l.name,
 		description: `${l.panes} pane(s) · ${l.watchEntries} watch${l.livePaneCount ? ` · ${l.livePaneCount} live` : ""}`,
 	}));
-	return fuzzyItems(items, current);
 }
 
-/** Saved session names (for `/session switch <name>` etc.). */
-function sessionNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
-	const items = (ctx.sessions?.list() ?? []).map((s) => ({
+/** Saved layout profile names (for `/layout switch <name>` etc.). */
+function layoutNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	return fuzzyItems(layoutItems(ctx), current);
+}
+
+/** All saved session items (unfiltered) — exact-save completion must see every name. */
+function sessionItems(ctx: ReplContext): AutocompleteItem[] {
+	return (ctx.sessions?.list() ?? []).map((s) => ({
 		value: s.name,
 		label: s.name,
 		description: `${s.target ? `${s.target} · ` : ""}${s.layout ? `[${s.layout}] · ` : ""}bp ${s.breakpoints}`.trim(),
 	}));
-	return fuzzyItems(items, current);
+}
+
+/** Saved session names (for `/session switch <name>` etc.). */
+function sessionNameItems(ctx: ReplContext, current: string): AutocompleteItem[] {
+	return fuzzyItems(sessionItems(ctx), current);
 }
 
 /** `/theme` — built-in preset names (one token only). */

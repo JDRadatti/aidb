@@ -13,6 +13,7 @@
 - for example, it could walk you through a bug (show you the data 
 - each change could also do data diffs or just correlate the data with what was just changed (maybe the data that touches the diff should be also diffed)
 - the vertical lines to the left of the source code is separated, but combined in asm. it should be combined in both and muted.
+- prompt hints for state assertions and expectations when stepping.
 
 
 # NEXT — do these first

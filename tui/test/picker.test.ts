@@ -540,6 +540,32 @@ describe("openPicker create row", () => {
 		const lines = h.rendered().join("\n");
 		assert.ok(lines.includes("bug1"));
 	});
+
+	it("a fuzzy-similar new name selects the create row: Enter saves, not loads", () => {
+		installPickerHost(null);
+		// The reported trap: saved "iasm", filter "asm" — subsequence-fuzzy but
+		// NOT a prefix. Create intent wins: the + create row is auto-selected.
+		const h = harness([{ value: "iasm", label: "iasm" }], { createLabel: (q) => `save current layout "${q}"` });
+		for (const ch of "asm") h.send(ch);
+		const lines = h.rendered().join("\n");
+		assert.ok(lines.includes("iasm"), "the fuzzy lookalike stays visible (one ↓ away)");
+		assert.ok(lines.includes('save current layout "asm"'), "the save row is in the band");
+		h.send(ENTER);
+		assert.deepEqual(h.created, ["asm"], "Enter creates 'asm' — it must NOT load/pick iasm");
+		assert.equal(h.picked, null);
+		assert.ok(!pickerActive());
+	});
+
+	it("a prefix filter stays in browse mode: Enter loads the existing name", () => {
+		installPickerHost(null);
+		// "ias" is a prefix of "iasm" — steering toward the saved name, so the
+		// existing row keeps the selection and Enter loads it (unchanged).
+		const h = harness([{ value: "iasm", label: "iasm" }], { createLabel: (q) => `save current layout "${q}"` });
+		for (const ch of "ias") h.send(ch);
+		h.send(ENTER);
+		assert.equal(h.picked?.value, "iasm");
+		assert.deepEqual(h.created, []);
+	});
 });
 
 describe("openPicker inline delete", () => {

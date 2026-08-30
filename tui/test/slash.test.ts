@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { AidbCompletionProvider, buildCommandRegistry } from "../src/slash.ts";
+import { AidbCompletionProvider, buildCommandRegistry, exactSaveItems } from "../src/slash.ts";
 import type { ReplContext } from "../src/repl.ts";
 
 /** Minimal fake window manager: only what the completer touches (list). */
@@ -154,5 +154,106 @@ describe("AidbCompletionProvider Tab gate (shouldTriggerFileCompletion)", () => 
 	it("never gates slash lines (position-aware args ride the same Tab request)", () => {
 		assert.equal(trigger("/win"), true);
 		assert.equal(trigger("/win load "), true);
+	});
+});
+
+describe("slash arguments · save verbs (exact-only, never fuzzy)", () => {
+	const p = provider();
+	const line = (text: string) => suggest(p, text, text.length);
+
+	it("/layout save asm must not retarget a fuzzy-similar saved iasm", async () => {
+		assert.equal(await line("/layout save asm"), null, "no dropdown ⇒ Enter submits the literal 'asm' and creates it");
+	});
+
+	it("a partial of a saved name is not exact — the typed text wins (creates)", async () => {
+		assert.equal(await line("/layout save ias"), null);
+	});
+
+	it("/session save asm and /target save asm are exact too", async () => {
+		assert.equal(await line("/session save asm"), null);
+		assert.equal(await line("/target save asm"), null);
+	});
+});
+
+describe("slash arguments · save verbs with a saved collection (exact match offered)", () => {
+	const layoutMeta = (name: string) => ({ name, file: `layouts/${name}.json`, savedAt: 1, panes: 1, watchEntries: 0 });
+	const sessionMeta = (name: string) => ({ name, file: `sessions/${name}.json`, savedAt: 1, breakpoints: 0 });
+	const targetMeta = (name: string) => ({ name, file: `targets/${name}.json`, savedAt: 1, kind: "launch", args: [] });
+	const savedCtx = {
+		sessions: {
+			activeName: () => null,
+			list: () => [sessionMeta("iasm")],
+			layouts: { current: () => null, list: () => [layoutMeta("iasm")] },
+			targets: { current: () => null, list: () => [targetMeta("iasm")] },
+		},
+	} as unknown as ReplContext;
+	const p = new AidbCompletionProvider(buildCommandRegistry(), savedCtx, process.cwd());
+	const line = (text: string) => suggest(p, text, text.length);
+
+	it("exact typed name still offers the saved profile (update path)", async () => {
+		const s = await line("/layout save iasm");
+		assert.ok(s);
+		assert.deepEqual(s!.values, ["iasm"]);
+	});
+
+	it("matches case-insensitively", async () => {
+		const s = await line("/layout save IASM");
+		assert.ok(s);
+		assert.deepEqual(s!.values, ["iasm"]);
+	});
+
+	it("same surface for /session and /target", async () => {
+		assert.deepEqual((await line("/session save iasm"))!.values, ["iasm"]);
+		assert.deepEqual((await line("/target save iasm"))!.values, ["iasm"]);
+	});
+
+	it("a trailing space after save offers ONLY the active profile (never the full list)", async () => {
+		const activeCtx = {
+			sessions: {
+				activeName: () => null,
+				list: () => [],
+				layouts: { current: () => "iasm", list: () => [layoutMeta("iasm")] },
+				targets: { current: () => null, list: () => [] },
+			},
+		} as unknown as ReplContext;
+		const ap = new AidbCompletionProvider(buildCommandRegistry(), activeCtx, process.cwd());
+		const s = await suggest(ap, "/layout save ", "/layout save ".length);
+		assert.ok(s);
+		assert.deepEqual(s!.values, ["iasm"]);
+	});
+
+	it("the APPLY path (/layout asm) keeps fuzzy matching — referencing saved names", async () => {
+		const s = await line("/layout asm");
+		assert.ok(s);
+		assert.deepEqual(s!.values, ["iasm"]);
+	});
+});
+
+describe("exactSaveItems", () => {
+	const names = [
+		{ value: "iasm", label: "iasm" },
+		{ value: "iasc", label: "iasc" },
+		{ value: "code", label: "code" },
+	];
+
+	it("rejects a fuzzy-similar (non-exact) typed name — the repro", () => {
+		assert.deepEqual(exactSaveItems(names, "asm", null), []);
+	});
+
+	it("a partial of a saved name is not exact", () => {
+		assert.deepEqual(exactSaveItems(names, "ias", null), []);
+	});
+
+	it("offers the exact name (case-insensitively)", () => {
+		assert.deepEqual(exactSaveItems(names, "iasm", null).map((i) => i.value), ["iasm"]);
+		assert.deepEqual(exactSaveItems(names, "IASM", null).map((i) => i.value), ["iasm"]);
+	});
+
+	it("an empty token offers only the active profile", () => {
+		assert.deepEqual(exactSaveItems(names, "", "iasc").map((i) => i.value), ["iasc"]);
+	});
+
+	it("an empty token with no active profile offers nothing — never the full list", () => {
+		assert.deepEqual(exactSaveItems(names, "", null), []);
 	});
 });

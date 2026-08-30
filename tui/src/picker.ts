@@ -188,14 +188,33 @@ interface BuiltList {
 }
 
 /**
+ * Whether a typed filter should default the selection to the `+ create` row —
+ * so Enter SAVES the typed name instead of picking a fuzzy lookalike. The
+ * create row wins when the filter names nothing saved exactly AND either no
+ * item fuzzy-matches it or it isn't a prefix of any saved name. Prefix filters
+ * steer at an existing name (browse intent: "ias" walking toward "iasm"); a
+ * non-prefix fuzzy hit (filter "asm" against saved "iasm") is overwhelmingly
+ * a NEW name — Enter on it must create, not load.
+ */
+export function shouldAutoSelectCreate(items: PickerItem[], filter: string, filtered: PickerItem[]): boolean {
+	if (!filter) return false;
+	const searchText = (item: PickerItem) => (item.search ?? item.label).replace(/\x1b\[[0-9;]*m/g, "");
+	if (items.some((item) => item.value.toLowerCase() === filter.toLowerCase())) return false;
+	if (filtered.length === 0) return true;
+	return !items.some((item) => searchText(item).toLowerCase().startsWith(filter.toLowerCase()));
+}
+
+/**
  * Build a fresh SelectList over fuzzy-filtered items, plus (when the filter
  * names nothing saved) the `+ create` row. Search only the label (name):
  * descriptions are for the eyes after narrowing, not search terms — "me"
  * would otherwise match every session whose description mentions "game".
  *
  * Selection: the create row is appended after any matches (one ↓ away), but
- * auto-selected when there are zero matches so Enter creates immediately.
- * An exact value match suppresses the create row entirely — no accidental
+ * auto-selected — so Enter creates instead of picking — exactly when
+ * `shouldAutoSelectCreate` reads the typed filter as a NEW name (no exact
+ * match, zero hits, or a non-prefix fuzzy hit like "asm" vs "iasm"). An
+ * exact value match suppresses the create row entirely — no accidental
  * overwrite of an existing profile by renaming onto it.
  */
 function buildList(items: PickerItem[], filter: string, options: PickerOptions): BuiltList {
@@ -229,7 +248,7 @@ function buildList(items: PickerItem[], filter: string, options: PickerOptions):
 		minPrimaryColumnWidth: 18,
 		maxPrimaryColumnWidth: 30,
 	});
-	if (showCreate && filtered.length === 0) list.setSelectedIndex(rows.length - 1);
+	if (showCreate && shouldAutoSelectCreate(items, filter, filtered)) list.setSelectedIndex(rows.length - 1);
 	return { list, createLabelText };
 }
 
