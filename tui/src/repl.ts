@@ -1150,7 +1150,7 @@ async function handleUndisplay(args: string, ctx: ReplContext): Promise<void> {
  * `/session` — the flattened collection grammar:
  *   `/session` (bare)      → fuzzy finder over saved sessions
  *   `/session <name>`      → restore that saved session directly
- *   `/session save [<name>]` → persist the current state now
+ *   `/session save <name>`   → persist the current state now
  * The finder adds `+ create` (saves current state under the typed name,
  * Enter), ctrl+d (delete, inline confirm) and ctrl+r (rename).
  */

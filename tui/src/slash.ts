@@ -210,7 +210,7 @@ function sessionNameItems(ctx: ReplContext, current: string): AutocompleteItem[]
  */
 const COMMANDS: Cmd[] = [
 	{ name: "help", description: "show help", argumentHint: "[topic]" },
-	{ name: "session", description: "saved debugger sessions", argumentHint: "[name] | save [name]",
+	{ name: "session", description: "saved debugger sessions", argumentHint: "[name] | save <name>",
 		args: sessionCompletion },
 	{ name: "target", description: "saved target profiles", argumentHint: "[name] | save <name>",
 		args: targetCompletion },
