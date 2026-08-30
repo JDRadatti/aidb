@@ -7,6 +7,7 @@ import {
 	TuiMainScreen,
 	matchesKey,
 	setKeybindings,
+	visibleWidth,
 	type Component,
 } from "@earendil-works/pi-tui";
 import { createDebugger } from "@earendil-works/pi-debugger-core";
@@ -571,6 +572,19 @@ const sessionsHooks: SessionHooks = {
 	},
 };
 
+function statusRightTags(): string {
+	const tag = (label: string, name: string): string =>
+		`${colors.muted(`[${label}: `)}${colors.accent(name)}${colors.muted("]")}`;
+	const parts: string[] = [];
+	const target = savedTargetName();
+	if (target) parts.push(tag("target", target));
+	const session = savedSessionName();
+	if (session) parts.push(tag("session", session));
+	const layout = savedLayoutName();
+	if (layout) parts.push(tag("layout", layout));
+	return parts.join(" ");
+}
+
 function updateStatus(): void {
 	const api = dbg.api;
 	const state = api.getState();
@@ -580,12 +594,17 @@ function updateStatus(): void {
 		colors.muted("○");
 	const location = api.sourceFile ? `${api.sourceFile}:${api.currentLine}` : "—";
 	const panes = windows.list().map((p) => `${p.idx}${p.active ? "*" : ""}·${p.id}`).join(" ");
-	const sessionName = store().sessions.activeName();
-	const sessionPrefix = sessionName ? `${colors.accent(sessionName)} ` : "";
 	const sessionHint = store().sessions.list().length > 0 ? ` │ ${colors.muted("[Alt+O open]")}` : "";
-	statusBar.setText(
-		`${sessionPrefix}${dot} ${state} │ ${panes} │ bp: ${api.breakpoints.size} │ ${location}${sessionHint}`,
-	);
+	const left = `${dot} ${state} │ ${panes} │ bp: ${api.breakpoints.size} │ ${location}${sessionHint}`;
+	// [target: x] [session: y] [layout: z] pinned to the right edge (only while
+	// the names exist on disk); drop them rather than let the line wrap.
+	const right = statusRightTags();
+	if (right && visibleWidth(left) + visibleWidth(right) < terminal.columns) {
+		const pad = Math.max(1, terminal.columns - visibleWidth(left) - visibleWidth(right));
+		statusBar.setText(`${left}${" ".repeat(pad)}${right}`);
+	} else {
+		statusBar.setText(left);
+	}
 	tui.requestRender();
 }
 
