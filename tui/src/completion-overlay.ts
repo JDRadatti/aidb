@@ -115,15 +115,6 @@ export class AidbEditor extends Editor {
 		const recallsPrevious =
 			kb.matches(data, "tui.editor.historyPrevious") || kb.matches(data, "tui.editor.cursorUp");
 
-		// Forward-delete while a dropdown is up: dismiss the dropdown instead of
-		// deleting a character — the fuzzy finder's Del is a cancel, and the
-		// slash dropdown behaves the same way. A second Delete (list gone)
-		// forward-deletes as usual.
-		if (autocompleteShown && kb.matches(data, "tui.editor.deleteCharForward")) {
-			this.cancelAutocompleteForInput();
-			return;
-		}
-
 		// Line-level deletes (ctrl+u / ctrl+k etc.) can leave an empty or
 		// irrelevant prompt with a stale list still composited above; upstream
 		// never re-requests for these, so spot-drop the dropdown afterwards.

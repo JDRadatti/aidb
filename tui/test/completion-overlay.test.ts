@@ -280,19 +280,6 @@ describe("AidbEditor dropdown dismissal", () => {
 		return aidb;
 	}
 
-	it("Delete dismisses the dropdown instead of deleting a character", async () => {
-		const aidb = await openDropdown();
-		aidb.handleInput("\x1b[3~"); // Delete
-		assert.equal(aidb.isShowingAutocomplete(), false, "Delete cancels the dropdown");
-		assert.equal(aidb.getText(), "/win list", "no character was deleted");
-	});
-
-	it("ctrl+d (deleteCharForward) dismisses the dropdown too", async () => {
-		const aidb = await openDropdown();
-		aidb.handleInput("\x04"); // ctrl+d
-		assert.equal(aidb.isShowingAutocomplete(), false, "ctrl+d cancels the dropdown");
-	});
-
 	it("ctrl+u clears the prompt and drops the stale dropdown", async () => {
 		const aidb = await openDropdown();
 		aidb.handleInput("\x15"); // ctrl+u (deleteToLineStart)
