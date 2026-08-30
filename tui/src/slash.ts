@@ -22,6 +22,7 @@ import {
 	type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 import type { ReplContext } from "./repl.ts";
+import { THEME_PRESET_MODE, THEME_PRESET_NAMES } from "./config.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import { dimPlaceholders } from "./theme.ts";
@@ -197,6 +198,21 @@ function sessionNameItems(ctx: ReplContext, current: string): AutocompleteItem[]
 	return fuzzyItems(items, current);
 }
 
+/** `/theme` — built-in preset names (one token only). */
+function themeCompletion(_ctx: ReplContext, tokens: string[], pos: number, current: string): AutocompleteItem[] | null {
+	if (pos === 0) {
+		return fuzzyItems(
+			THEME_PRESET_NAMES.map((name) => ({
+				value: name,
+				label: name,
+				description: `${THEME_PRESET_MODE[name] ?? ""} palette`.trim(),
+			})),
+			current,
+		);
+	}
+	return null;
+}
+
 // ---------- registry ----------
 
 /**
@@ -217,6 +233,8 @@ const COMMANDS: Cmd[] = [
 	{ name: "layout", description: "saved layout profiles", argumentHint: "[name] | save <name>",
 		args: layoutCompletion },
 	{ name: "open", description: "one finder over sessions · layouts · targets", argumentHint: "" },
+	{ name: "theme", description: "built-in theme presets", argumentHint: "[name]",
+		args: themeCompletion },
 	{ name: "settings", description: "effective configuration", argumentHint: "" },
 	{ name: "win", description: "pane management", argumentHint: "<sub> [...]",
 		args: winCompletion },

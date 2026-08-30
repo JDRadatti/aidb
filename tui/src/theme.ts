@@ -26,6 +26,16 @@ function bg(code: number): (s: string) => string {
 	return (s: string) => `\x1b[48;5;${code}m${s}${RESET}`;
 }
 
+/**
+ * A short `▊▊▊▊▊` swatch in the first `count` roles of a palette — a live
+ * preview of a theme preset used by picker rows. The colours are the preset's
+ * OWN role codes, so each row previews exactly what picking it will look like.
+ */
+export function paletteSwatch(theme: ThemeConfig, count = 5): string {
+	const roles = [theme.accent, theme.muted, theme.success, theme.warning, theme.error];
+	return roles.slice(0, count).map((code) => fg(code)("▊")).join("");
+}
+
 export interface ColorRoles {
 	accent(s: string): string;
 	muted(s: string): string;

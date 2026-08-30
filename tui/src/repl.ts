@@ -9,11 +9,22 @@ import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView } from "./views/watch.ts";
 import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
-import { colors, dimPlaceholders } from "./theme.ts";
+import { colors, dimPlaceholders, paletteSwatch } from "./theme.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
-import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
+import {
+	canonicalThemeName,
+	currentThemePreset,
+	persistThemePreset,
+	THEME_PRESET_MODE,
+	THEME_PRESETS,
+	THEME_PRESET_NAMES,
+	actionKeyLabel,
+	type Action,
+	type Config,
+	type ConfigSources,
+} from "./config.ts";
 import type { LayoutMeta, SessionMeta, SessionLivePane, TargetMeta } from "./session-store.ts";
 export type { LayoutMeta, SessionMeta, TargetMeta };
 import { openPicker, type PickerItem, relativeTime } from "./picker.ts";
@@ -133,11 +144,13 @@ const HELP = [
 	"                                    ctrl+d delete · ctrl+r rename.",
 	"  /session <name> /target <name> /layout <name>   act on that one directly.",
 	"  /open (Alt-O) · `>`               one combined finder over sessions · layouts · targets.",
+	"  /theme (bare)                     fuzzy finder over theme presets (live colour swatches);",
+	"  /theme <name>                     apply + save that preset (~/.aidbrc), keeping your overrides.",
 	"  /settings                         effective config (theme, gdb, keys, sessions).",
 	"  /config reload                    re-read ~/.aidbrc + ./.aidb.json.",
 	"  terminology: a session = one debugging goal { target + layout + breakpoints };",
 	"  targets/layouts are shared profiles; everything saved lives on disk.",
-	"  slash commands: /help · /open · /settings · /session · /target · /layout · /win · /config · /watch · /new · /quit",
+	"  slash commands: /help · /open · /settings · /session · /target · /layout · /theme · /win · /config · /watch · /new · /quit",
 	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Enter on an empty prompt repeats the last command — keep pressing Enter to step. Commands that make no sense to repeat (run, quit, /new, switching sessions/layouts/targets, /win or /watch mutations) are not repeated. Topic help: help <topic> (e.g. help win).",
 	"Scroll: Ctrl+Up/Ctrl+Down (or PgUp/PgDn) scroll the active pane; Home/End",
 ].join("\n");
@@ -1444,6 +1457,71 @@ function openLayoutPicker(ctx: ReplContext): void {
 	openCollectionPicker(LAYOUTS_SPEC, ctx);
 }
 
+/**
+ * `/theme` — apply a built-in preset and persist it to ~/.aidbrc.
+ *   `/theme` (bare)      → fuzzy finder over presets (live colour swatches)
+ *   `/theme <name>`      → apply + save that preset
+ * Persisting swaps only the rc file's `preset` key when the user already has
+ * a `theme` object, so their per-role overrides survive. Aliases herdr uses
+ * (tokyonight, onedark, ...) work via `canonicalThemeName`.
+ */
+async function handleTheme(args: string, ctx: ReplContext): Promise<void> {
+	const io = ctx.io;
+	const name = args.trim();
+	if (!name) {
+		openThemePicker(ctx);
+		return;
+	}
+	applyThemePreset(name, ctx);
+}
+
+/** Resolve, persist and live-apply a preset name (shared by the picker pick
+ * and `/theme <name>`). Reports unknown names, save failures and any config
+ * issues that the reload surfaced. */
+function applyThemePreset(rawName: string, ctx: ReplContext): void {
+	const io = ctx.io;
+	const name = canonicalThemeName(rawName);
+	if (!name) {
+		io.error(`Unknown theme '${rawName}'. Presets: ${THEME_PRESET_NAMES.join(", ")}`);
+		return;
+	}
+	const rcFile = ctx.configSources.rc ?? path.join(os.homedir(), ".aidbrc");
+	const persisted = persistThemePreset(name, rcFile);
+	const { sources } = ctx.reloadConfig();
+	if (persisted.error) {
+		io.warning(`Theme '${name}' applied for this session, but ${rcFile} could not be updated: ${persisted.error}`);
+	} else {
+		io.success(`Theme '${name}' applied — saved to ${rcFile}.`);
+	}
+	for (const issue of sources.issues) io.warning(`config ${issue.path}: ${issue.message}`);
+}
+
+/** `› /theme <name>` echo; used by bare `/theme`. Rows preview the preset's
+ * OWN palette (`paletteSwatch`) and mark the one currently selected in the rc
+ * file with ✳ — so switching themes is a one-Esc-away, colour-accurate pick. */
+function openThemePicker(ctx: ReplContext): void {
+	const rcFile = ctx.configSources.rc ?? path.join(os.homedir(), ".aidbrc");
+	const current = currentThemePreset(rcFile);
+	const items: PickerItem[] = THEME_PRESET_NAMES.map((name) => ({
+		value: name,
+		search: name,
+		label: `${paletteSwatch(THEME_PRESETS[name]!)}  ${name}${name === current ? " ✳" : ""}`,
+		description: `${THEME_PRESET_MODE[name] ?? ""} palette`.trim(),
+	}));
+	openPicker({
+		title: "theme presets",
+		items,
+		onPick: (item) => {
+			if (!item.value) return;
+			const echo = `/theme ${item.value}`;
+			ctx.io.line(`${colors.accent("› ")}${echo}`);
+			setLastReplay(echo);
+			applyThemePreset(item.value, ctx);
+		},
+		onCancel: () => clearLastReplay(),
+	});
+}
+
 /** `› /win switch <pane>` on pick; used by bare `/win switch`. */
 function openPanePicker(ctx: ReplContext): void {
 	const items: PickerItem[] = ctx.windows.list().map((p) => ({
@@ -1543,6 +1621,7 @@ export function isBarePickerCommand(input: string): boolean {
 		text === "/session" ||
 		text === "/target" ||
 		text === "/layout" ||
+		text === "/theme" ||
 		text === "/open"
 	);
 }
@@ -1744,6 +1823,10 @@ async function handleSlashCommand(input: string, ctx: ReplContext): Promise<void
 
 		case "layout":
 			await handleLayout(args, ctx);
+			break;
+
+		case "theme":
+			await handleTheme(args, ctx);
 			break;
 
 		case "quit":
