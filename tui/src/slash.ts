@@ -24,6 +24,7 @@ import {
 import type { ReplContext } from "./repl.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
+import { dimPlaceholders } from "./theme.ts";
 
 /** A registry entry with an argument completer per token position. */
 interface Cmd {
@@ -241,11 +242,20 @@ export class AidbCompletionProvider extends CombinedAutocompleteProvider {
 	private readonly cmds: Cmd[];
 
 	constructor(cmds: Cmd[], ctx: ReplContext, basePath: string, fdPath?: string | null) {
+		// The suggestions render the hint + description in the dropdown's muted
+		// `description` role. Tint the `<placeholder>` args (e.g. `<name>`)
+		// lighter up front (`restoreMuted` re-opens the muted wrap after each
+		// token so a hint's reset can't kill the wrap for the rest of the row),
+		// and pre-fuse hint + description so stock doesn't re-concatenate them.
 		super(
 			cmds.map((c) => ({
 				name: c.name,
-				...(c.description && { description: c.description }),
-				...(c.argumentHint && { argumentHint: c.argumentHint }),
+				...(c.description && {
+					description: dimPlaceholders(
+						c.argumentHint ? `${c.argumentHint} — ${c.description}` : c.description,
+						true,
+					),
+				}),
 			})),
 			basePath,
 			fdPath,

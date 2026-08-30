@@ -9,13 +9,13 @@ import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView } from "./views/watch.ts";
 import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
+import { colors, dimPlaceholders } from "./theme.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
 import { actionKeyLabel, type Action, type Config, type ConfigSources } from "./config.ts";
 import type { LayoutMeta, SessionMeta, SessionLivePane, TargetMeta } from "./session-store.ts";
 export type { LayoutMeta, SessionMeta, TargetMeta };
-import { colors } from "./theme.ts";
 import { openPicker, type PickerItem, relativeTime } from "./picker.ts";
 import { renderSettings } from "./views/settings.ts";
 
@@ -188,17 +188,22 @@ const WIN_HELP = [
 function showHelp(topic: string | undefined, io: ReplIO, actions: Config["keybindings"]["actions"]): void {
 	const normalized = topic?.trim().toLowerCase();
 	if (normalized === "win" || normalized === "window" || normalized === "windows") {
-		io.line(WIN_HELP);
+		io.line(dimPlaceholders(WIN_HELP));
 	} else if (normalized) {
 		io.error(`No help topic '${topic}'. Topics: win`);
 	} else {
-		io.line(fillKeys(HELP, actions));
+		io.line(dimPlaceholders(fillKeys(HELP, actions)));
 	}
 }
 
-/** Substitute `<action>` tokens with the configured key chord labels. */
+/** Substitute `<action>` key tokens (continue/step/scroll/open only) with the
+ * configured chord labels. Arg placeholders (`<expr>`, `<name>`, ...) are NOT
+ * actions and must survive untouched so dimPlaceholders can tint them —
+ * before this, `<expr>` etc. were silently replaced with "—". */
 function fillKeys(sheet: string, actions: Config["keybindings"]["actions"]): string {
-	return sheet.replace(/<\w+>/g, (token) => actionKeyLabel(actions, token.slice(1, -1) as Action));
+	return sheet.replace(/<(\w+)>/g, (token, name: string) =>
+		Object.hasOwn(actions, name) ? actionKeyLabel(actions, name as Action) : token,
+	);
 }
 
 /**
