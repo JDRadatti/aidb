@@ -28,6 +28,9 @@ import {
 	resetLivePanes,
 	getLastLaunch,
 	setLastLaunch,
+	setLastReplay,
+	clearLastReplay,
+	replayLastCommand,
 	makeWatchView,
 	makeLivePaneView,
 	isBarePickerCommand,
@@ -710,11 +713,18 @@ const replCtx: ReplContext = {
 
 async function submit(raw: string): Promise<void> {
 	const text = raw.trim();
-	editor.setText("");
 	if (!text) {
+		// Empty prompt: GDB-style replay of the last command — unless it no
+		// longer makes sense (run, quit, /new, pane/layout mutations, ...).
+		await replayLastCommand(replCtx);
+		updateStatus();
 		tui.requestRender();
 		return;
 	}
+	// Capture the replay target before dispatch, win or lose (gdb parity: an
+	// errored command still occupies the repeat buffer).
+	setLastReplay(text);
+	editor.setText("");
 	editor.addToHistory(text);
 	persistHistory(text);
 	if (isBarePickerCommand(text) || text.startsWith(">")) {
@@ -789,13 +799,38 @@ const PANE_NAV_KEYS = new Set<string>(["end", "home", "ctrl+d", "ctrl+u"]);
 
 /** Resolve an Action -> handler, guarding on the target being stopped. */
 const actionHandlers: Record<Action, (data: string) => void> = {
-	continue: () => guard((api) => spinner.run("continuing", () => api.continue())),
-	stepOver: () => guard((api) => spinner.run("stepping over", () => api.stepOver())),
-	stepInto: () => guard((api) => spinner.run("stepping into", () => api.stepInto())),
-	stepOut: () => guard((api) => spinner.run("stepping out", () => api.stepOut())),
-	scrollUp: (data) => scrollActivePane(data),
-	scrollDown: (data) => scrollActivePane(data),
-	open: () => void handleOpen(replCtx),
+	// Key-driven steps feed the replay buffer so Enter right after F10/F11 keeps
+	// the same cadence (matches gdb's repeat-on-blank-Enter for stepping).
+	continue: () => {
+		setLastReplay("continue");
+		guard((api) => spinner.run("continuing", () => api.continue()));
+	},
+	stepOver: () => {
+		setLastReplay("next");
+		guard((api) => spinner.run("stepping over", () => api.stepOver()));
+	},
+	stepInto: () => {
+		setLastReplay("step");
+		guard((api) => spinner.run("stepping into", () => api.stepInto()));
+	},
+	stepOut: () => {
+		setLastReplay("finish");
+		guard((api) => spinner.run("stepping out", () => api.stepOut()));
+	},
+	// Non-command actions must not leave a stale line in the buffer: an old
+	// `break main` replaying after a scroll/finder would duplicate a breakpoint.
+	scrollUp: (data) => {
+		clearLastReplay();
+		scrollActivePane(data);
+	},
+	scrollDown: (data) => {
+		clearLastReplay();
+		scrollActivePane(data);
+	},
+	open: () => {
+		clearLastReplay();
+		void handleOpen(replCtx);
+	},
 };
 
 function guard(run: (api: DebuggerAPI) => Promise<unknown>): void {

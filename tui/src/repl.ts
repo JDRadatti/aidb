@@ -134,7 +134,7 @@ const HELP = [
 	"  terminology: a session = one debugging goal { target + layout + breakpoints };",
 	"  targets/layouts are shared profiles; everything saved lives on disk.",
 	"  slash commands: /help · /open · /settings · /session · /target · /layout · /win · /config · /watch · /new · /quit",
-	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Topic help: help <topic> (e.g. help win).",
+	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Enter on an empty prompt repeats the last command — keep pressing Enter to step. Commands that make no sense to repeat (run, quit, /new, switching sessions/layouts/targets, /win or /watch mutations) are not repeated. Topic help: help <topic> (e.g. help win).",
 	"Scroll: Ctrl+Up/Ctrl+Down (or PgUp/PgDn) scroll the active pane; Home/End",
 ].join("\n");
 
@@ -205,6 +205,24 @@ function fillKeys(sheet: string, actions: Config["keybindings"]["actions"]): str
  * Last program launched, so bare `run` can restart it.
  */
 let lastLaunch: { program: string; args: string[] } | null = null;
+
+/**
+ * Empty-Enter replay buffer (GDB's "blank Enter repeats last command").
+ * Session-local on purpose: the persisted history spans runs, and replaying
+ * yesterday's `close 1` against today's layout would be harmful. Set on every
+ * non-empty submission (win or lose) and on picker-executed actions; cleared
+ * on picker cancel, key-driven actions that don't feed a replay, and `/new`.
+ */
+let lastReplay: string | null = null;
+/** Overwrite the replay buffer (used by picker echoes and keybinding actions). */
+export function setLastReplay(line: string): void {
+	const trimmed = line.trim();
+	lastReplay = trimmed ? trimmed : null;
+}
+/** Drop the replay buffer (picker cancel, non-command key actions). */
+export function clearLastReplay(): void {
+	lastReplay = null;
+}
 
 /** Read the current target, so the session snapshot can persist it. */
 export function getLastLaunch(): { program: string; args: string[] } | null {
@@ -1110,6 +1128,8 @@ function entrySummary(view: WatchListView, index: number): string {
  * all delegate here.
  */
 async function handleNew(ctx: ReplContext, name?: string): Promise<void> {
+	// A fresh session must not inherit a replay from the old one.
+	clearLastReplay();
 	const hooks = ctx.sessions;
 	if (!hooks) {
 		// Sessions off: still reset the live debugger + layout in place.
@@ -1226,27 +1246,36 @@ function openCollectionPicker(spec: CollectionSpec, ctx: ReplContext, itemEcho =
 			? {
 					createLabel: (query: string) => `save current ${spec.term} "${query}"`,
 					onCreate: (query: string) => {
-						ctx.io.line(`${colors.accent("› ")}${spec.command} save ${query}`);
+						const echo = `${spec.command} save ${query}`;
+						ctx.io.line(`${colors.accent("› ")}${echo}`);
+						setLastReplay(echo);
 						void spec.onCreate(ctx, query);
 					},
 				}
 			: {}),
 		onPick: (item) => {
 			if (!item.value) return;
-			ctx.io.line(`${colors.accent("› ")}${itemEcho(item.value)}`);
+			const echo = itemEcho(item.value);
+			ctx.io.line(`${colors.accent("› ")}${echo}`);
+			setLastReplay(echo);
 			void spec.onPick(ctx, item.value);
 		},
 		onDelete: (item) => {
 			if (!item.value) return;
 			ctx.io.line(`${colors.accent("› ")}${spec.command} delete ${item.value}`);
+			// The delete echo is informative (no `delete` verb exists); replaying
+			// it would just error, so the buffer must not hold it.
+			clearLastReplay();
 			void spec.onDelete(ctx, item.value);
 		},
 		onRename: (item, newName) => {
 			if (!item.value || !newName) return;
-			ctx.io.line(`${colors.accent("› ")}${spec.command} save ${newName}`);
+			const echo = `${spec.command} save ${newName}`;
+			ctx.io.line(`${colors.accent("› ")}${echo}`);
+			setLastReplay(echo);
 			void spec.onRename?.(ctx, item.value, newName);
 		},
-		onCancel: () => undefined,
+		onCancel: () => clearLastReplay(),
 	});
 }
 
@@ -1308,10 +1337,12 @@ function openPanePicker(ctx: ReplContext): void {
 		items,
 		onPick: (item) => {
 			if (!item.value) return;
-			ctx.io.line(`${colors.accent("› ")}/win switch ${item.value}`);
+			const echo = `/win switch ${item.value}`;
+			ctx.io.line(`${colors.accent("› ")}${echo}`);
+			setLastReplay(echo);
 			ctx.windows.switchTo(item.value);
 		},
-		onCancel: () => undefined,
+		onCancel: () => clearLastReplay(),
 	});
 }
 
@@ -1369,10 +1400,12 @@ export async function handleOpen(ctx: ReplContext, seed?: string): Promise<void>
 			// `open` callback lives on the original item, so re-find it here.
 			const openItem = items.find((i) => i.value === item.value);
 			if (!openItem) return;
-			ctx.io.line(`${colors.accent("› ")}/open ${item.value}`);
+			const echo = `/open ${item.value}`;
+			ctx.io.line(`${colors.accent("› ")}${echo}`);
+			setLastReplay(echo);
 			void openItem.open(ctx);
 		},
-		onCancel: () => undefined,
+		onCancel: () => clearLastReplay(),
 	});
 }
 
@@ -1625,6 +1658,102 @@ async function handleConfig(args: string, ctx: ReplContext): Promise<void> {
 		io.info("config issues:");
 		for (const issue of ctx.configSources.issues) io.warning(`  ${issue.path}: ${issue.message}`);
 	}
+}
+
+/**
+ * GDB's `dont_repeat()` table, flattened: whether an empty-Enter replay of
+ * `input` makes sense. The first token decides, with sub-token cases for the
+ * positional pane/watch commands and named profile switches. Replay still
+ * routes through the full dispatcher, so state guards (`requireStopped`,
+ * `runningBlocked`) apply to replays too — this only refuses commands whose
+ * *second* execution would act on a changed world (index-shifting,
+ * layout-mutating, one-shot profile switches, destructive) or re-enter gdb's
+ * definition modes and hang the DAP channel.
+ */
+export function canReplayCommand(input: string): boolean {
+	const words = input.trim().split(/\s+/).filter(Boolean);
+	const command = words[0] ?? "";
+	const sub = words[1];
+
+	switch (command) {
+		// One-shot / destructive start verbs — never replay (gdb's `run` is
+		// dont_repeat too). `file` is the hidden alias of `run` in aidb.
+		case "run":
+		case "r":
+		case "file":
+		case "attach":
+		case "detach":
+		case "quit":
+		case "q":
+		case "/run":
+		case "/launch":
+		case "/attach":
+		case "/quit":
+		case "/new":
+			return false;
+
+		// Pane ops are positional: replayed against a shifted layout they'd hit a
+		// different pane (gdb's `layout next/prev` analog). `/win list` is pure.
+		case "/win":
+			return sub === "list";
+
+		// `/watch` mutations renumber entries / duplicate expressions; the
+		// listing forms (bare or `list`) are pure reads and repeat.
+		case "/watch":
+			return sub === undefined || sub === "list";
+
+		// Named profile switches are one-shot "move the whole world" verbs:
+		// re-applying a layout rebuilds the pane tree (wiping any tweaks made
+		// since), re-restoring a session clobbers live working state with the
+		// snapshot, re-loading a target re-reads symbols and unsettles
+		// breakpoints. Bare forms reopen the finder; `save` is idempotent.
+		case "/layout":
+		case "/session":
+		case "/target":
+			return sub === undefined || sub === "save";
+
+		// `/open <name>` restores whatever was picked (session/layout/target);
+		// bare `/open` (or a `> query` seed) just reopens the finder.
+		case "/open":
+			return sub === undefined;
+
+		// gdb definition-mode / interactive passthroughs — replaying would
+		// re-enter an editor block in the inferior gdb and can hang DAP.
+		case "commands":
+		case "define":
+		case "document":
+		case "python":
+		case "guile":
+		case "while":
+		case "if":
+		case "layout":
+		case "focus":
+		case "refresh":
+		case "update":
+		case "tui":
+			return false;
+
+		// Everything else (steps, prints, info, profile saves, listings,
+		// read-only slash commands, arbitrary gdb passthrough) repeats.
+		default:
+			return true;
+	}
+}
+
+/**
+ * Enter on an empty prompt: replay the last command when it still makes sense.
+ * Echoes the line like a typed submit (the transcript is aidb's record of what
+ * happened), then dispatches through the identical `handleReplInput` path so
+ * every existing guard and picker behavior applies unchanged.
+ */
+export async function replayLastCommand(ctx: ReplContext): Promise<void> {
+	if (!lastReplay) return; // nothing executed this session → stay silent (gdb parity)
+	if (!canReplayCommand(lastReplay)) {
+		ctx.io.info(`(not repeated: ${lastReplay})`);
+		return;
+	}
+	ctx.io.line(`${colors.accent("› ")}${lastReplay}`);
+	await handleReplInput(lastReplay, ctx);
 }
 
 export async function handleReplInput(rawInput: string, ctx: ReplContext): Promise<void> {
