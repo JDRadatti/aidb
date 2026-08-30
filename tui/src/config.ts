@@ -38,8 +38,6 @@ export interface ThemeConfig {
 	borderInactive: number;
 	/** 256-colour background fill shared by every pane. */
 	paneBg: number;
-	/** 256-colour background fill for the prompt/editor chrome band (distinct from panes). */
-	inputBg: number;
 	/* Semantic token roles; source and assembly use the same set. */
 	keyword: number;
 	string: number;
@@ -145,7 +143,6 @@ export const DEFAULT_CONFIG: Config = {
 		borderActive: 255,
 		borderInactive: 234,
 		paneBg: 235,
-		inputBg: 237,
 		keyword: 36,
 		string: 32,
 		number: 33,
@@ -210,7 +207,7 @@ export function validateConfig(raw: unknown, issues: ConfigIssue[] = []): Config
 	};
 	const themeKeys = [
 		"accent", "muted", "success", "warning", "error", "border",
-		"borderActive", "borderInactive", "paneBg", "inputBg", "keyword", "string", "number", "comment", "mnemonic", "register", "directive",
+		"borderActive", "borderInactive", "paneBg", "keyword", "string", "number", "comment", "mnemonic", "register", "directive",
 	] as const;
 	const theme = {} as ThemeConfig;
 	for (const key of themeKeys) {

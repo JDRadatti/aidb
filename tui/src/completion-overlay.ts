@@ -30,8 +30,6 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 
-import { inputBgFill } from "./theme.ts";
-
 /** The pieces of Editor's autocomplete state the stripper needs. */
 interface EditorInternals {
 	autocompleteState(): unknown;
@@ -117,7 +115,26 @@ export class AidbEditor extends Editor {
 		const recallsPrevious =
 			kb.matches(data, "tui.editor.historyPrevious") || kb.matches(data, "tui.editor.cursorUp");
 
+		// Forward-delete while a dropdown is up: dismiss the dropdown instead of
+		// deleting a character — the fuzzy finder's Del is a cancel, and the
+		// slash dropdown behaves the same way. A second Delete (list gone)
+		// forward-deletes as usual.
+		if (autocompleteShown && kb.matches(data, "tui.editor.deleteCharForward")) {
+			this.cancelAutocompleteForInput();
+			return;
+		}
+
+		// Line-level deletes (ctrl+u / ctrl+k etc.) can leave an empty or
+		// irrelevant prompt with a stale list still composited above; upstream
+		// never re-requests for these, so spot-drop the dropdown afterwards.
+		const lineClearingDelete =
+			kb.matches(data, "tui.editor.deleteToLineStart") || kb.matches(data, "tui.editor.deleteToLineEnd");
+
 		super.handleInput(data);
+
+		if (lineClearingDelete && this.isShowingAutocomplete() && !this.autocompleteStillRelevant()) {
+			this.cancelAutocompleteForInput();
+		}
 
 		// Upstream applied the argument completion and kept the prompt open
 		// (a line still starting with a slash) instead of submitting. Run the
@@ -151,6 +168,40 @@ export class AidbEditor extends Editor {
 		if (typeof rec.submitValue === "function") rec.submitValue();
 	}
 
+	/** Dismiss the suggestion dropdown (TS-private upstream, probed like the rest). */
+	private cancelAutocompleteForInput(): void {
+		const rec = this as unknown as { cancelAutocomplete?: () => void };
+		if (typeof rec.cancelAutocomplete === "function") rec.cancelAutocomplete();
+	}
+
+	/**
+	 * Would the current line still produce completions if a request fired?
+	 * Mirrors the completion triggers (slash commands, @/path-shaped tokens,
+	 * the run/file program verb). Used to spot-drop a stale dropdown after
+	 * line-level edits that upstream never re-requests (e.g. ctrl+u).
+	 */
+	private autocompleteStillRelevant(): boolean {
+		const text = this.getText();
+		const col = Math.min(this.getCursor().col, text.length);
+		const before = text.slice(0, col).trimStart();
+		if (!before) return false;
+		if (before.startsWith("/")) return true;
+		const tokens = before.split(/\s+/).filter(Boolean);
+		const current = tokens[tokens.length - 1] ?? "";
+		if (
+			current.startsWith("@") ||
+			current.startsWith("./") ||
+			current.startsWith("../") ||
+			current.startsWith("~/") ||
+			current.startsWith("/") ||
+			current.includes("/")
+		) {
+			return true;
+		}
+		const verb = tokens[0] ?? "";
+		return (verb === "run" || verb === "file") && tokens.length >= 2;
+	}
+
 	render(width: number): string[] {
 		const result = super.render(width);
 		this.internals ??= internalsOf(this);
@@ -159,12 +210,9 @@ export class AidbEditor extends Editor {
 			this.dropdownLines = null;
 			this.lastHeight = result.length;
 		};
-		// Chrome band: tint the editor block (border + input + border) with the
-		// theme's inputBg role so it reads as distinct chrome below the panes.
-		const tint = (lines: string[]): string[] => tintBand(lines, width);
 		if (!intern || intern.autocompleteState() === null || !intern.autocompleteList()) {
 			inactive();
-			return tint(result);
+			return result;
 		}
 		// Mirror Editor.render's width bookkeeping exactly so the recomputed
 		// block matches what stock would have appended.
@@ -183,25 +231,12 @@ export class AidbEditor extends Editor {
 		const matches = tail.length === expected.length && tail.every((line, i) => line === expected[i]);
 		if (!matches) {
 			inactive(); // upstream layout changed; fall back to inline rendering
-			return tint(result);
+			return result;
 		}
 		this.dropdownLines = expected;
 		this.lastHeight = start;
-		return tint(result.slice(0, start));
+		return result.slice(0, start);
 	}
-}
-
-/**
- * Paint a chrome band: every cell gets the theme's `inputBg` fill. The lines
- * carry per-span ANSI resets (`\x1b[0m`) that would clear the fill mid-line,
- * so the fill is re-asserted after every reset, and the line is padded out to
- * the band width so the fill spans the whole row.
- */
-function tintBand(lines: readonly string[], width: number): string[] {
-	const fill = inputBgFill();
-	const paint = (line: string): string =>
-		`${fill}${line.replace(/\x1b\[0m/g, `\x1b[0m${fill}`)}${fill}\x1b[0m`;
-	return lines.map((line) => paint(line.padEnd(width)));
 }
 
 /**
@@ -269,18 +304,13 @@ export function attachDropdownOverlay(
 			// Read fresh every composite pass; resolveOverlayLayout re-runs after
 			// this returns, so the mutated offset applies to this very frame.
 			overlayOptions.offsetY = -(rowsBelow() + editor.lastHeight);
-			const band = (): readonly string[] => {
-				// Custom sources first (first non-empty wins), then the editor's own
-				// dropdown. `sources` is read live so callers can register/unregister.
-				for (const source of options.sources ?? []) {
-					const lines = source(width);
-					if (lines && lines.length > 0) return lines;
-				}
-				return editorDropdownSource(editor)(width) ?? [];
-			};
-			// Same chrome treatment as the editor block: the fuzzy/popup band gets
-			// the inputBg fill too, so the whole input layer reads as one bar.
-			return tintBand(band(), width);
+			// Custom sources first (first non-empty wins), then the editor's own
+			// dropdown. `sources` is read live so callers can register/unregister.
+			for (const source of options.sources ?? []) {
+				const lines = source(width);
+				if (lines && lines.length > 0) return [...lines];
+			}
+			return [...(editorDropdownSource(editor)(width) ?? [])];
 		},
 	};
 

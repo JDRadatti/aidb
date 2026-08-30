@@ -61,9 +61,6 @@ function stubTui(rows = 24): { tui: TUI; entries: OverlayEntry[] } {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
 
-/** Plain visible text: ANSI stripped, trailing band padding trimmed. */
-const plain = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
-
 /** Drive a slash-command suggestion into `editor` and return its render. */
 async function activateAndRender(editor: Editor, stub: { tui: TUI }): Promise<string[]> {
 	editor.setAutocompleteProvider(fakeProvider());
@@ -99,8 +96,7 @@ describe("AidbEditor", () => {
 		const stockLines = stock.render(WIDTH);
 
 		assert.ok(aidb.dropdownLines);
-		assert.deepEqual([...aidbLines, ...aidb.dropdownLines].map(plain), stockLines.map(plain));
-		assert.ok(aidbLines.join("").includes("\x1b[48;5;237m"), "the prompt band is tinted with inputBg");
+		assert.deepEqual([...aidbLines, ...aidb.dropdownLines], stockLines);
 	});
 
 	it("a single Enter applies an argument completion and submits the slash command", async () => {
@@ -204,7 +200,7 @@ describe("AidbEditor", () => {
 		const aidbLines = aidb.render(WIDTH);
 		const stockLines = stock.render(WIDTH);
 		assert.equal(aidb.dropdownLines, null);
-		assert.deepEqual(aidbLines.map(plain), stockLines.map(plain), "stock output (uncolored) after the dropdown closes");
+		assert.deepEqual(aidbLines, stockLines);
 	});
 });
 
@@ -272,6 +268,58 @@ describe("AidbEditor history recall", () => {
 	});
 });
 
+describe("AidbEditor dropdown dismissal", () => {
+	/** Type a slash command with the always-answering fake provider; dropdown is up. */
+	async function openDropdown(): Promise<AidbEditor> {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme());
+		aidb.setAutocompleteProvider(fakeProvider());
+		for (const ch of "/win list") aidb.handleInput(ch);
+		await settle();
+		assert.ok(aidb.isShowingAutocomplete(), "dropdown is showing");
+		return aidb;
+	}
+
+	it("Delete dismisses the dropdown instead of deleting a character", async () => {
+		const aidb = await openDropdown();
+		aidb.handleInput("\x1b[3~"); // Delete
+		assert.equal(aidb.isShowingAutocomplete(), false, "Delete cancels the dropdown");
+		assert.equal(aidb.getText(), "/win list", "no character was deleted");
+	});
+
+	it("ctrl+d (deleteCharForward) dismisses the dropdown too", async () => {
+		const aidb = await openDropdown();
+		aidb.handleInput("\x04"); // ctrl+d
+		assert.equal(aidb.isShowingAutocomplete(), false, "ctrl+d cancels the dropdown");
+	});
+
+	it("ctrl+u clears the prompt and drops the stale dropdown", async () => {
+		const aidb = await openDropdown();
+		aidb.handleInput("\x15"); // ctrl+u (deleteToLineStart)
+		assert.equal(aidb.getText(), "", "prompt emptied");
+		assert.equal(aidb.isShowingAutocomplete(), false, "dropdown dismissed after clearing the line");
+	});
+
+	it("ctrl+k from line start with an emptied line drops the dropdown too", async () => {
+		const aidb = await openDropdown();
+		aidb.handleInput("\x01"); // ctrl+a (cursorLineStart) — cursor to column 0
+		assert.equal(aidb.isShowingAutocomplete(), true, "dropdown still up after moving the cursor");
+		aidb.handleInput("\x0b"); // ctrl+k (deleteToLineEnd) clears the whole line
+		assert.equal(aidb.getText(), "", "prompt emptied");
+		assert.equal(aidb.isShowingAutocomplete(), false, "no stale dropdown on an emptied line");
+	});
+
+	it("Delete with no dropdown still forward-deletes", () => {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme());
+		aidb.setText("abc");
+		aidb.handleInput("\x1b[D"); // left — cursor onto 'b' (col 1)
+		aidb.handleInput("\x1b[D"); // left again — cursor before 'b'
+		aidb.handleInput("\x1b[3~"); // Delete
+		assert.equal(aidb.getText(), "ac", "forward-delete works when no dropdown is up");
+	});
+});
+
 describe("attachDropdownOverlay", () => {
 	it("renders the dropdown above the prompt via a non-capturing overlay", async () => {
 		const { tui, entries } = stubTui();
@@ -287,7 +335,7 @@ describe("attachDropdownOverlay", () => {
 		assert.deepEqual(entry.component.render(WIDTH), [], "no suggestions -> renders nothing");
 
 		await activateAndRender(editor, { tui });
-		assert.deepEqual(entry.component.render(WIDTH).map(plain), [...editor.dropdownLines!].map(plain));
+		assert.deepEqual(entry.component.render(WIDTH), [...editor.dropdownLines!]);
 		assert.equal(overlay.options.offsetY, -(rowsBelow + editor.lastHeight));
 	});
 
@@ -332,12 +380,12 @@ describe("attachDropdownOverlay", () => {
 		let pickerOpen = true;
 		sources.push((width) => (pickerOpen ? pickerBand(width) : null));
 		const band = entry.component.render(WIDTH);
-		assert.deepEqual(band.map(plain), pickerBand(WIDTH).map(plain), "custom source composites in place of the dropdown");
+		assert.deepEqual(band, pickerBand(WIDTH), "custom source composites in place of the dropdown");
 		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight), "geometry is the dropdown's own");
 
 		// Spent (picker closed): falls back to the editor's dropdown.
 		pickerOpen = false;
-		assert.deepEqual(entry.component.render(WIDTH).map(plain), [...editor.dropdownLines!].map(plain));
+		assert.deepEqual(entry.component.render(WIDTH), [...editor.dropdownLines!]);
 	});
 });
 
