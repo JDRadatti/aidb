@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { INTERPRETERS, renderBitmap, renderBytes, renderChars, renderCode, renderHexdump, renderInterleaved, renderInterpreter, renderSparkline, renderTable, renderTree, renderTuple, makeBitmapInterpreter } from "../src/viz/interpreters.ts";
+import { applyTheme } from "../src/theme.ts";
+import { DEFAULT_CONFIG } from "../src/config.ts";
 import { ViewFlags } from "../src/viz/types.ts";
 import type { BindingSnapshot, Rect, VarNode } from "../src/viz/types.ts";
 import { FRAME_RGB_BYTES, MESSAGE_BYTES } from "./fixtures/bytes.ts";
@@ -163,8 +165,11 @@ describe("byte renderers", () => {
 describe("renderCode", () => {
 	it("renders source lines with a current-line marker", () => {
 		const lines = renderCode({ kind: "source", file: "example.c", startLine: 9, currentLine: 10, lines: ["int main()", "return 0;"] }, undefined, WIDE);
-		assert.match(lines[0]!, /^        9 \| \x1b\[36mint\x1b\[0m main\(\)$/);
-		assert.match(lines[1]!, /^\x1b\[36m▶      10 \| \x1b\[0m\x1b\[36mreturn\x1b\[0m \x1b\[33m0\x1b\[0m;$/);
+		assert.match(lines[0]!, /^        9 │ \x1b\[36mint\x1b\[0m main\(\)$/);
+		// The current row is wrapped like the fuzzy picker's selected row:
+		// bold + accent over the WHOLE line, re-opened after each token reset
+		// so token colours survive inside the highlight.
+		assert.match(lines[1]!, /^\x1b\[1m\x1b\[36m▶      10 │ \x1b\[36mreturn\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[33m0\x1b\[0m\x1b\[1m\x1b\[36m;\x1b\[0m$/);
 	});
 
 	it("renders aligned verified and pending breakpoint markers", () => {
@@ -176,9 +181,9 @@ describe("renderCode", () => {
 		}, undefined, WIDE);
 
 		assert.match(lines[0]!, /\x1b\[31m●\x1b\[0m/);
-		assert.match(lines[0]!, /●\x1b\[0m     9 \| \x1b\[36mint\x1b\[0m main\(\)/);
+		assert.match(lines[0]!, /●\x1b\[0m     9 │ \x1b\[36mint\x1b\[0m main\(\)/);
 		assert.match(lines[2]!, /\x1b\[31m○\x1b\[0m/);
-		assert.match(lines[2]!, /○\x1b\[0m    11 \| done\(\)/);
+		assert.match(lines[2]!, /○\x1b\[0m    11 │ done\(\)/);
 	});
 
 	it("highlights conservative C/C++ syntax without changing source text", () => {
@@ -190,6 +195,73 @@ describe("renderCode", () => {
 
 		assert.match(line!, /\x1b\[36mint\x1b\[0m answer = \x1b\[33m42\x1b\[0m;/);
 		assert.match(line!, /\x1b\[90m\/\/ return "unchanged"\x1b\[0m/);
+	});
+
+	it("parses full numeric literals as ONE number token (decimals, exponents, hex, suffixes)", () => {
+		const [line] = renderCode({
+			kind: "source",
+			startLine: 1,
+			lines: ["double a = 3.5f; double b = 1.5e-3; int c = 0x1F; unsigned long d = 42uL; float e = 3.5;"],
+		}, undefined, WIDE);
+		// Each literal is a single `number`-role token (default code 33): the
+		// old regex stopped at the first dot (`3.5f` -> `3` + stray `5f`) and
+		// left `0x1F`/`1e3`/`42uL` completely uncolored.
+		assert.match(line!, /\x1b\[33m3\.5f\x1b\[0m/);
+		assert.match(line!, /\x1b\[33m1\.5e-3\x1b\[0m/);
+		assert.match(line!, /\x1b\[33m0x1F\x1b\[0m/);
+		assert.match(line!, /\x1b\[33m42uL\x1b\[0m/);
+		assert.match(line!, /\x1b\[33m3\.5\x1b\[0m/);
+		assert.equal((line!.match(/\x1b\[33m/g) ?? []).length, 5);
+	});
+
+	it("colors C builtin types with the type role (nvim @type), distinct from keywords", () => {
+		applyTheme({ ...DEFAULT_CONFIG.theme, keyword: 31, type: 22 });
+		try {
+			const [line] = renderCode({
+				kind: "source",
+				startLine: 1,
+				lines: ["int main() { return sizeof(int); }"],
+			}, undefined, WIDE);
+			assert.match(line!, /│ \x1b\[22mint\x1b\[0m main\(\) \{ \x1b\[31mreturn\x1b\[0m \x1b\[31msizeof\x1b\[0m\(\x1b\[22mint\x1b\[0m\); \}/);
+
+			// `struct`/`union` are statement keywords, not type names: keyword role.
+			const [structLine] = renderCode({
+				kind: "source",
+				startLine: 1,
+				lines: ["struct Point { int x; };"],
+			}, undefined, WIDE);
+			assert.match(structLine!, /│ \x1b\[31mstruct\x1b\[0m Point \{ \x1b\[22mint\x1b\[0m x; \}/);
+		} finally {
+			applyTheme(DEFAULT_CONFIG.theme);
+		}
+	});
+
+	it("dims assembly jump-target suffixes (<main+77>) with the label role, distinct from function", () => {
+		applyTheme({ ...DEFAULT_CONFIG.theme, function: 95, label: 245 });
+		try {
+			const [line] = renderCode({
+				kind: "assembly",
+				instructions: [{ address: "0x555555555160", symbol: "main", instruction: "ne 0x555555555176 <main+77>", current: true }],
+			}, undefined, WIDE);
+			// The whole `<main+77>` is ONE label-role token (dim gray by default),
+			// while the symbol COLUMN keeps the `function` role; the address and
+			// mnemonic are untouched. Codes >= 128 use the 256-colour `38;5;` form.
+			assert.match(line!, /\x1b\[95m<main>[ ]+\x1b\[0m/);
+			assert.match(line!, /\x1b\[38;5;245m<main\+77>\x1b\[0m/);
+			assert.match(line!, /\x1b\[93mne\x1b\[0m/);
+			assert.match(line!, /\x1b\[33m0x555555555176\x1b\[0m/);
+		} finally {
+			applyTheme(DEFAULT_CONFIG.theme);
+		}
+	});
+
+	it("wraps the current assembly row like the picker's selected row (bold + accent)", () => {
+		const [line] = renderCode({
+			kind: "assembly",
+			instructions: [{ address: "0x401126", symbol: "main", instruction: "push %rbp", current: true }],
+		}, undefined, WIDE);
+		assert.ok(line!.startsWith("\x1b[1m\x1b[36m▶"), `expected a bold-accent wrap: ${JSON.stringify(line)}`);
+		assert.ok(/\x1b\[1m\x1b\[36m \x1b\[93mpush\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[94m%rbp\x1b\[0m\x1b\[1m\x1b\[36m\x1b\[0m$/.test(line!), `expected token re-open inside the wrap: ${JSON.stringify(line)}`);
 	});
 
 	it("renders assembly instructions with a current-PC marker", () => {
@@ -256,11 +328,13 @@ describe("renderCode", () => {
 			kind: "assembly",
 			instructions: [{ address: "0x401126", symbol: "main", instruction: "push %rbp" }],
 		}, undefined, WIDE);
-		// `<main>` is wrapped in the `function` role (\x1b[95m), the mnemonic
-		// keeps its existing bold-accent wrap (\x1b[1m\x1b[36m) — the two no
-		// longer share one look, which is what merged them before.
+		// The mnemonic gets the `mnemonic` role (\x1b[93m) and `<main>` the
+		// `function` role (\x1b[95m); operands resolve via the asm lexer
+		// (registers \x1b[94m, immediates/numbers \x1b[33m) — no more bold-accent
+		// on the mnemonic nor the operand symbols.
 		assert.match(line!, /\x1b\[95m<main>[ ]+\x1b\[0m/);
-		assert.match(line!, /\x1b\[1m\x1b\[36mpush\x1b\[0m/);
+		assert.match(line!, /\x1b\[93mpush\x1b\[0m/);
+		assert.match(line!, /\x1b\[94m%rbp\x1b\[0m/);
 	});
 
 	it("renders source lines with mapped instructions beneath them", () => {
@@ -275,11 +349,11 @@ describe("renderCode", () => {
 			],
 		}, undefined, WIDE);
 
-		assert.match(stripAnsi(lines[0]!), /11 \|/);
+		assert.match(stripAnsi(lines[0]!), /11 │/);
 		assert.match(stripAnsi(lines[0]!), /int.*x.*=.*1/);
-		assert.match(stripAnsi(lines[1]!), /│ 0x401126\s+<main>\s+mov/);
-		assert.match(stripAnsi(lines[2]!), /▶ ●\s+12 \| x\+\+;/);
-		assert.match(stripAnsi(lines[3]!), /▶\s+│ 0x401127/);
+		assert.match(stripAnsi(lines[1]!), /│\s+0x401126\s+<main>\s+mov/);
+		assert.match(stripAnsi(lines[2]!), /▶ ●\s+12 │ x\+\+;/);
+		assert.match(stripAnsi(lines[3]!), /▶\s+│\s+0x401127/);
 	});
 
 	it("renders a notice above assembly when source is unavailable", () => {
@@ -290,7 +364,7 @@ describe("renderCode", () => {
 		}, undefined, WIDE);
 
 		assert.match(stripAnsi(lines[0]!), /^i Source unavailable/);
-		assert.match(stripAnsi(lines[1]!), /▶\s+│ 0x401126/);
+		assert.match(stripAnsi(lines[1]!), /▶\s+│\s+0x401126/);
 	});
 });
 

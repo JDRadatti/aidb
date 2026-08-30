@@ -12,7 +12,7 @@
  * `/config reload` is reflected immediately.
  */
 
-import { keyLabel, type Action, type Config, type ConfigSources } from "../config.ts";
+import { keyLabel, THEME_PRESET_NAMES, type Action, type Config, type ConfigSources } from "../config.ts";
 import { colors } from "../theme.ts";
 
 /** Human label for a full chord list, e.g. ["ctrl+up","pageUp"] -> "Ctrl+Up/PgUp". */
@@ -60,8 +60,10 @@ export function renderSettings(config: Config, sources: ConfigSources): string[]
 	const t = config.theme;
 	push(`${colors.muted("  roles:")} ${themeLine("accent", t.accent)} · ${themeLine("muted", t.muted)} · ${themeLine("success", t.success)} · ${themeLine("warning", t.warning)} · ${themeLine("error", t.error)} · ${themeLine("placeholder", t.placeholder)}`);
 	push(`${colors.muted("  frame:")} ${themeLine("border", t.border)} · ${themeLine("borderActive", t.borderActive)} · ${themeLine("borderInactive", t.borderInactive)} · ${themeLine("paneBg", t.paneBg)} · ${themeLine("inputBorder", t.inputBorder)}`);
-	push(`${colors.muted("  tokens:")} ${themeLine("keyword", t.keyword)} · ${themeLine("string", t.string)} · ${themeLine("number", t.number)} · ${themeLine("comment", t.comment)}`);
-	push(`${colors.muted("  asm:")}    ${themeLine("mnemonic", t.mnemonic)} · ${themeLine("register", t.register)} · ${themeLine("directive", t.directive)} · ${themeLine("function", t.function)} ${origin("theme")}`);
+	push(`${colors.muted("  tokens:")} ${themeLine("keyword", t.keyword)} · ${themeLine("string", t.string)} · ${themeLine("number", t.number)} · ${themeLine("comment", t.comment)} · ${themeLine("type", t.type)} · ${themeLine("preproc", t.preproc)}`);
+	push(`${colors.muted("  asm:")}    ${themeLine("mnemonic", t.mnemonic)} · ${themeLine("register", t.register)} · ${themeLine("label", t.label)} · ${themeLine("function", t.function)} ${origin("theme")}`);
+	push(`${colors.muted("  presets:")} ${THEME_PRESET_NAMES.map((n) => colors.keyword(n)).join(" · ")}`);
+	push(`  ${colors.muted("select:")} ${colors.success('"theme": "dracula"')} or ${colors.success('"theme": { "preset": "nord", "accent": 9 }')}`);
 
 	/* gdb */
 	push("");

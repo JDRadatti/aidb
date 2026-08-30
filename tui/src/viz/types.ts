@@ -218,6 +218,31 @@ export interface BitmapOptions {
 	scale?: "fit" | "1:1";
 }
 
+/** Semantic token kinds the source highlighter can emit (see viz/interpreters.ts —
+ * per-line regex + keyword set, like gdb's source-highlight). */
+export type SyntaxKind =
+	| "comment"
+	| "string"
+	| "char"
+	| "number"
+	| "keyword"
+	| "type"
+	| "preprocessor"
+	| "identifier"
+	| "other";
+
+/** Semantic token kinds the assembly highlighter can emit (see viz/interpreters.ts). */
+export type AsmTokenKind =
+	| "mnemonic"
+	| "register"
+	| "immediate"
+	| "number"
+	| "directive"
+	| "symbol"
+	| "label"
+	| "comment"
+	| "other";
+
 	export interface Interpreter {
 	readonly id: string;
 	readonly title: string;

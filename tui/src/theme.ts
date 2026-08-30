@@ -44,19 +44,40 @@ export interface ColorRoles {
 	/** Shared pane fill (all panes the same colour). */
 	paneBg(s: string): string;
 
-	/* Semantic token roles (source + assembly share the same palette). */
+	/* Semantic token roles (source + assembly share the same palette).
+ * Named to match nvim's standard treesitter highlight groups so a theme
+ * ported from nvim (e.g. ``{ "@keyword": … }`` in a lua config) maps onto
+ * the same keys here: keyword→@keyword, string→@string, number→@number,
+ * comment→@comment, function→@function, type→@type, preproc→@preproc,
+ * label→@label. The asm-only roles keep nvim's legacy asm syntax names
+ * (`asmMnemonic` / `asmRegister`). */
 	keyword(s: string): string;
 	string(s: string): string;
 	number(s: string): string;
 	comment(s: string): string;
+	/** C builtin types (int, char, void, …) — nvim `@type`/`@type.builtin`. */
+	type(s: string): string;
+	/** `#include`/`#define` and asm directives (`.section`) — nvim `@preproc`. */
+	preproc(s: string): string;
 	mnemonic(s: string): string;
 	register(s: string): string;
-	directive(s: string): string;
 	/** Function/symbol labels in assembly columns (`<main+4>`). */
 	function(s: string): string;
+	/** Assembly jump-target suffixes (`<main+77>` at the end of a branch) — nvim `@label`; deliberately dim. */
+	label(s: string): string;
 	/** Placeholder args (`<name>`) in command help / dropdown hints. */
 	placeholder(s: string): string;
+
+	/* Token-kind → role resolution (the single place that decides what a
+	 * token gets coloured with; used by the source/asm highlighters in viz). */
+	syntaxRole(kind: SyntaxKind): ColorWrap;
+	asmRole(kind: AsmTokenKind): ColorWrap;
 }
+
+/** A text wrapper: the colour fn or null to leave the terminal foreground. */
+export type ColorWrap = ((s: string) => string) | null;
+
+import type { SyntaxKind, AsmTokenKind } from "./viz/types.ts";
 
 /** Build the role set from a colour-code theme. */
 export function buildColors(theme: ThemeConfig): ColorRoles {
@@ -76,11 +97,43 @@ export function buildColors(theme: ThemeConfig): ColorRoles {
 		string: fg(theme.string),
 		number: fg(theme.number),
 		comment: fg(theme.comment),
+		type: fg(theme.type),
+		preproc: fg(theme.preproc),
 		mnemonic: fg(theme.mnemonic),
 		register: fg(theme.register),
-		directive: fg(theme.directive),
 		function: fg(theme.function),
+		label: fg(theme.label),
 		placeholder: fg(theme.placeholder),
+		/* Token-kind → role resolutions. Identifiers, punctuation and
+		 * whitespace stay terminal-default (null) so code reads naturally;
+		 * every other kind is pinned to a role. These closures read the live
+		 * `colors` object at call time, so /config reload re-colours existing
+		 * panes without a re-render trigger. */
+		syntaxRole: (kind) => {
+			switch (kind) {
+				case "comment": return colors.comment;
+				case "string":
+				case "char": return colors.string;
+				case "number": return colors.number;
+				case "keyword": return colors.keyword;
+				case "type": return colors.type;
+				case "preprocessor": return colors.preproc;
+				default: return null;
+			}
+		},
+		asmRole: (kind) => {
+			switch (kind) {
+				case "mnemonic": return colors.mnemonic;
+				case "register": return colors.register;
+				case "immediate":
+				case "number": return colors.number;
+				case "directive": return colors.preproc;
+				case "symbol": return colors.function;
+				case "label": return colors.label;
+				case "comment": return colors.comment;
+				default: return null;
+			}
+		},
 	};
 }
 
@@ -100,15 +153,27 @@ const DEFAULT_THEME: ThemeConfig = {
 	string: 32,
 	number: 33,
 	comment: 90,
+	type: 36,
+	preproc: 96,
 	mnemonic: 93,
 	register: 94,
-	directive: 96,
 	function: 95,
+	/** Jump-target suffixes stay quiet: a mid gray, far less loud than `function`. */
+	label: 102,
 	placeholder: 245,
 };
 
 /** Live role set. Reassigned by `applyTheme`; imported by value by callers. */
 export const colors: ColorRoles = buildColors(DEFAULT_THEME);
+
+/**
+ * The default palette is deliberately NOT one of the presets (they live in
+ * config.ts and are opt-in via `theme: "<name>"` / `/theme`): this ANSI
+ * set is the zero-config baseline that the golden render tests pin. The
+ * token→role mapping above is what makes the same palette read coherently
+ * across source, asm and UI — every kind has ONE role and every role has a
+ * reason.
+ */
 
 /** Swap the live colour roles in place (idempotent; used by /config reload). */
 export function applyTheme(theme: ThemeConfig): void {

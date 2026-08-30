@@ -10,7 +10,7 @@ function config(over: Partial<Config> = {}): Config {
 		theme: {
 			accent: 36, muted: 90, success: 32, warning: 33, error: 31,
 			border: 90, inputBorder: 240, borderActive: 255, borderInactive: 234, paneBg: 235,
-			keyword: 36, string: 32, number: 33, comment: 90, mnemonic: 93, register: 94, directive: 96, function: 95, placeholder: 245,
+			keyword: 36, string: 32, number: 33, comment: 90, type: 36, preproc: 96, mnemonic: 93, register: 94, label: 102, function: 95, placeholder: 245,
 		},
 		gdb: { path: "gdb", args: [], env: {} },
 		keybindings: {

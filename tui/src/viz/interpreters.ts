@@ -33,61 +33,95 @@ export {
 } from "./byte-renderers.ts";
 export { renderBytes, renderChars, renderTuple, renderBitmap } from "./byte-renderers.ts";
 
-const KEYWORDS = new Set([
-	"alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue", "default", "delete", "do", "double", "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "namespace", "new", "noexcept", "not", "nullptr", "operator", "or", "private", "protected", "public", "register", "reinterpret_cast", "return", "short", "signed", "sizeof", "static", "static_cast", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
-]);
+/**
+ * Per-line regex syntax highlighting — the same shape gdb uses via
+ * source-highlight (regex + keyword sets, not a lexer). Kinds are resolved
+ * through `colors.syntaxRole` so the kind→role map stays in one place
+ * (theme.ts) and follows /config reload.
+ *
+ * Tokenization is per-line, so a block comment only colours on the line that
+ * contains its terminator — acceptable for a debugger source pane (gdb's own
+ * highlighter behaves the same without source-highlight installed); the
+ * visible wins the lexer experiment brought are preserved here:
+ *  - `#include`/`#define` become a `preprocessor` token (preproc role =
+ *    nvim `@preproc`), not a whole-line bold-accent shortcut;
+ *  - asm resolves the FIRST identifier as `mnemonic` and LATER ones as
+ *    `symbol` (function role) — the old regex had those backwards;
+ *  - numbers parse the full C/C++ literal (decimals `3.5`, exponents `1e-3`,
+ *    hex `0x1F`, suffixes `42uL`) instead of stopping at the first dot;
+ *  - angular jump-target suffixes (`<main+77>`) are ONE `label` token (nvim
+ *    `@label`), deliberately dim so branch operands recede;
+ *  - the current source line / instruction is wrapped like the fuzzy
+ *    picker's selected row (bold + accent over the whole row, token colors
+ *    re-opened inside) via `currentLineWrap`.
+ */
 
 function highlightCode(line: string): string {
-	if (/^\s*#/.test(line)) return colors.bold(colors.accent(line));
-	const token = /(\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_]\w*\b)/g;
+	const token = /(#[A-Za-z_]\w*|\/\/.*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-F]+)?(?:[pP][+-]?\d+)?|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFlLuU]*\b|\b[A-Za-z_]\w*\b)/g;
 	let result = "";
 	let offset = 0;
 	for (const match of line.matchAll(token)) {
 		const value = match[0];
 		const index = match.index ?? 0;
 		result += line.slice(offset, index);
-		if (value.startsWith("//") || value.startsWith("/*")) result += colors.comment(value);
-		else if (value.startsWith('"') || value.startsWith("'")) result += colors.string(value);
-		else if (/^\d/.test(value)) result += colors.number(value);
-		else if (KEYWORDS.has(value)) result += colors.keyword(value);
-		else result += value;
+		let wrap: ((s: string) => string) | null = null;
+		if (value.startsWith("//") || value.startsWith("/*")) wrap = colors.syntaxRole("comment");
+		else if (value.startsWith('"') || value.startsWith("'")) wrap = colors.syntaxRole("string");
+		else if (value.startsWith("#")) wrap = colors.syntaxRole("preprocessor");
+		else if (/^\d/.test(value)) wrap = colors.syntaxRole("number");
+		else if (TYPES.has(value)) wrap = colors.syntaxRole("type");
+		else if (KEYWORDS.has(value)) wrap = colors.syntaxRole("keyword");
+		result += wrap ? wrap(value) : value;
 		offset = index + value.length;
 	}
 	return result + line.slice(offset);
 }
 
 /**
- * Colour the mnemonic (/AT&T) operands of a single disassembled instruction:
- * the first identifier is the mnemonic, then %-registers, $-immediates,
- * constant addresses, directives and #-comments each get a token role.
+ * Colour the operands of one disassembled instruction: the FIRST bare
+ * identifier is the mnemonic (`colors.mnemonic`); every later one is a
+ * symbol/function name (`colors.function`) — the old regex had this
+ * backwards (bold-accent on the mnemonic, magenta on operand symbols).
+ * %-registers, $-immediates, numbers, directives and #-comments each
+ * resolve through `colors.asmRole`.
  */
 function highlightAsm(line: string): string {
-	const token = /(#[^\n]*|\$[^ \t,]|%\w+|\b\d+(?:[xX][0-9a-fA-F]+)?\b|\.\w+|\b[A-Za-z_.][\w.-]*\b)/g;
+	const token = /(#[^\n]*|\$(?:-?0[xX][0-9a-fA-F]+|-?\d+)|%\w+|<[^ \t,>]+>|\b\d+(?:[xX][0-9a-fA-F]+)?\b|\.\w+|\b[A-Za-z_.][\w.-]*\b)/g;
 	let result = "";
 	let offset = 0;
-	let firstIdentifier = false;
+	let firstIdentifier = true;
 	for (const match of line.matchAll(token)) {
 		const value = match[0];
 		const index = match.index ?? 0;
 		result += line.slice(offset, index);
-		let wrap: (s: string) => string;
-		if (value.startsWith("#")) wrap = colors.comment;
-		else if (value.startsWith("$")) wrap = colors.number;
-		else if (value.startsWith("%")) wrap = colors.register;
-		else if (/^\d/.test(value)) wrap = colors.number;
-		else if (value.startsWith(".") && /^\.[A-Za-z]/.test(value)) wrap = colors.directive;
+		let wrap: ((s: string) => string) | null;
+		if (value.startsWith("#")) wrap = colors.asmRole("comment");
+		else if (value.startsWith("$")) wrap = colors.asmRole("immediate");
+		else if (value.startsWith("%")) wrap = colors.asmRole("register");
+		else if (value.startsWith("<")) wrap = colors.asmRole("label");
+		else if (/^\d/.test(value)) wrap = colors.asmRole("number");
+		else if (value.startsWith(".") && /^\.[A-Za-z]/.test(value)) wrap = colors.asmRole("directive");
 		else {
-			wrap = firstIdentifier ? colors.mnemonic : (s: string) => colors.bold(colors.accent(s));
-			firstIdentifier = true;
+			wrap = firstIdentifier ? colors.asmRole("mnemonic") : colors.asmRole("symbol");
+			firstIdentifier = false;
 		}
-		result += wrap(value);
+		result += wrap ? wrap(value) : value;
 		offset = index + value.length;
 	}
 	return result + line.slice(offset);
 }
 
+const KEYWORDS = new Set([
+	"alignas", "alignof", "and", "asm", "auto", "break", "case", "catch", "class", "const", "constexpr", "continue", "default", "delete", "do", "else", "enum", "explicit", "export", "extern", "false", "for", "friend", "goto", "if", "inline", "namespace", "new", "noexcept", "not", "nullptr", "operator", "or", "private", "protected", "public", "register", "reinterpret_cast", "return", "sizeof", "static", "static_cast", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "using", "virtual", "volatile", "while", "xor",
+]);
+
+/** C scalar builtin types — colored with the `type` role (nvim `@type`), so
+ * themes can give them a colour distinct from statement keywords the way
+ * nvim themes do (@type vs @keyword). */
+const TYPES = new Set(["bool", "char", "double", "float", "int", "long", "short", "signed", "unsigned", "void", "wchar_t"]);
+
 function errorLines(snap: BindingSnapshot): string[] {
-	return [`✗ ${snap.error}`];
+	return [colors.error(`✗ ${snap.error}`)];
 }
 
 function formatNumber(value: number): string {
@@ -117,6 +151,21 @@ function padVisible(text: string, width: number): string {
 	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
 }
 
+/**
+ * Wrap one rendered row the way the fuzzy picker draws its selected row:
+ * bold + accent over the whole line (`colors.bold(colors.accent(…))` — the
+ * picker's `selectedText` wrap), RE-OPENING the wrap after every inner SGR
+ * reset so per-token colours survive inside the highlight instead of the
+ * first token's reset killing it for the rest of the row.
+ */
+function currentLineWrap(text: string): string {
+	// Build `\x1b[1m` + the accent opener WITHOUT composing the wrappers
+	// (colors.bold(colors.accent("")) would embed a mid-string reset and
+	// cancel the bold before any text).
+	const open = `\x1b[1m${colors.accent("").slice(0, -4)}`;
+	return open + text.replace(/\x1b\[0m/g, `\x1b[0m${open}`) + "\x1b[0m";
+}
+
 /** Render source or assembly with a compact current-location marker. */
 export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undefined, rect: Rect): string[] {
 	if (snap.error) return errorLines(snap);
@@ -131,12 +180,13 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 			const breakpoint = instruction.line === undefined ? undefined : snap.breakpoints?.find((candidate) => candidate.line === instruction.line);
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
 			const sourceLine = instruction.line === undefined ? "     " : String(instruction.line).padStart(5);
-			return formatInstruction(
+			const row = formatInstruction(
 				`${marker} ${breakpointMarker} ${sourceLine} `,
 				instruction.address,
 				currentSymbol,
 				instruction.instruction,
 			);
+			return current ? currentLineWrap(row) : row;
 		});
 		return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 	}
@@ -149,8 +199,8 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 		const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === number);
 		const executionMarker = current ? "▶" : " ";
 		const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
-		const numberAndCode = `${String(number).padStart(5)} | `;
-		if (current) return `${colors.accent(`${executionMarker} ${breakpointMarker} ${numberAndCode}`)}${highlightCode(line)}`;
+		const numberAndCode = `${String(number).padStart(5)} │ `;
+		if (current) return currentLineWrap(`${executionMarker} ${breakpointMarker} ${numberAndCode}${highlightCode(line)}`);
 		const gutter = breakpoint ? `${executionMarker} ${colors.error(breakpointMarker)} ${numberAndCode}` : `${executionMarker} ${breakpointMarker} ${numberAndCode}`;
 		return gutter + highlightCode(line);
 	});
@@ -163,8 +213,9 @@ function formatInstruction(gutter: string, address: string, symbol: string | und
 	// rows with and without a symbol line up (_that_ is the "gdb makes a clear
 	// distinction between src and func name" gap — the old padEnd counted
 	// escape bytes as characters and drifted by (18 - len) per row). The
-	// symbol gets its own color role (`function`) so it separates from the
-	// bold-accent mnemonic operands.
+	// symbol gets its own color role (`function`); the mnemonic gets the
+	// `mnemonic` role and operands resolve register/immediate/number/function
+	// via the asm regex.
 	return `${gutter}${colors.muted(padVisible(address, 18))} ${colors.function(padVisible(symbolTag, 20))} ${highlightAsm(instruction)}`;
 }
 
@@ -172,19 +223,24 @@ export function renderInterleaved(snap: BindingSnapshot): string[] {
 	if (snap.error) return errorLines(snap);
 	const rows = snap.interleaved ?? [];
 	if (rows.length === 0) return ["waiting for data…"];
-	const lines = rows.map((row: InterleavedRow) => {
-		if (row.kind === "source") {
-			const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === row.line);
-			const marker = row.current ? "▶" : " ";
+	const lines = rows.map((entry: InterleavedRow) => {
+		if (entry.kind === "source") {
+			const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === entry.line);
+			const marker = entry.current ? "▶" : " ";
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
-			const prefix = `${marker} ${breakpointMarker} ${String(row.line).padStart(5)} | `;
-			return row.current ? colors.accent(prefix) + highlightCode(row.text) : prefix + highlightCode(row.text);
+			const prefix = `${marker} ${breakpointMarker} ${String(entry.line).padStart(5)} │ `;
+			return entry.current ? currentLineWrap(prefix + highlightCode(entry.text)) : prefix + highlightCode(entry.text);
 		}
-		const instruction = row.instruction;
-		// The `│` gutter aligns with the code renderer's source rows (marker +
-		// 8 columns, pipe at index 9) so mapped lines line up under their source.
+		const instruction = entry.instruction;
+		// The `│` gutter keeps the rail at the same column as the code renderer's
+		// source rows (marker + breakpoint + 5-digit line column, pipe at index 10)
+		// — both are the solid `│` so the rail reads as one continuous line. The
+		// assembly content starts at the same column as the source code above it
+		// (one space after the rail), so a mapped instruction recedes under its
+		// source line without extra indentation.
 		const marker = instruction.current ? "▶" : " ";
-		return formatInstruction(`${marker}        │ `, instruction.address, instruction.symbol, instruction.instruction);
+		const row = formatInstruction(`${marker}         │ `, instruction.address, instruction.symbol, instruction.instruction);
+		return instruction.current ? currentLineWrap(row) : row;
 	});
 	return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 }

@@ -422,6 +422,29 @@ function flagBit(name: string): ViewFlags | undefined {
  * Core Variables are mapped to VarNodes here so the viz layer never imports
  * debugger types.
  */
+
+/** Split-once file cache for `readSource`: a whole file is read and split
+ * on the FIRST fetch, then every later window (step, scroll, viewport change)
+ * slices the cached lines instead of re-reading + re-splitting the file each
+ * stop. Bounded LRU; a file edited mid-session keeps its start-of-session
+ * view, which matches the short-lived debugging session model. */
+const SOURCE_LINES_CACHE = new Map<string, string[]>();
+const MAX_SOURCE_FILES = 16;
+
+function cachedFileLines(file: string): Promise<string[]> {
+	const hit = SOURCE_LINES_CACHE.get(file);
+	if (hit) return Promise.resolve(hit);
+	return readFile(file, "utf8").then((source) => {
+		const lines = source.split(/\r?\n/);
+		if (SOURCE_LINES_CACHE.size >= MAX_SOURCE_FILES) {
+			const oldest = SOURCE_LINES_CACHE.keys().next().value;
+			if (oldest !== undefined) SOURCE_LINES_CACHE.delete(oldest);
+		}
+		SOURCE_LINES_CACHE.set(file, lines);
+		return lines;
+	});
+}
+
 function makeFetchCtx(ctx: ReplContext): FetchCtx {
 	return {
 		evaluate: (expression, context) => ctx.getApi().evaluate(expression, context ?? "watch"),
@@ -435,8 +458,8 @@ function makeFetchCtx(ctx: ReplContext): FetchCtx {
 				.filter((breakpoint) => breakpoint.file && sourcePathKey(breakpoint.file) === sourcePathKey(source));
 		},
 		readSource: async (file, startLine, count) => {
-			const source = await readFile(file, "utf8");
-			return source.split(/\r?\n/).slice(Math.max(0, startLine - 1), Math.max(0, startLine - 1) + count);
+			const lines = await cachedFileLines(file);
+			return lines.slice(Math.max(0, startLine - 1), Math.max(0, startLine - 1) + count);
 		},
 		getVariableChildren: async (reference, start, count) => {
 			const children = await ctx.getApi().getVariableChildren(reference, start, count);
@@ -1749,8 +1772,8 @@ async function handleConfig(args: string, ctx: ReplContext): Promise<void> {
 	const origin = (k: string) => ctx.configSources.sectionOrigin[k as keyof Config];
 	io.line("aidb config");
 	io.info(`  theme      (${origin("theme")}): accent=${theme.accent} muted=${theme.muted} border=${theme.border} inputBorder=${theme.inputBorder} borderActive=${theme.borderActive} borderInactive=${theme.borderInactive} placeholder=${theme.placeholder}`);
-	io.info(`  tokens     (theme): keyword=${theme.keyword} string=${theme.string} number=${theme.number} comment=${theme.comment}`);
-	io.info(`  asm        (theme): mnemonic=${theme.mnemonic} register=${theme.register} directive=${theme.directive} function=${theme.function}`);
+	io.info(`  tokens     (theme): keyword=${theme.keyword} string=${theme.string} number=${theme.number} comment=${theme.comment} type=${theme.type} preproc=${theme.preproc}`);
+	io.info(`  asm        (theme): mnemonic=${theme.mnemonic} register=${theme.register} label=${theme.label} function=${theme.function}`);
 	io.info(`  gdb        (${origin("gdb")}): path=${gdb.path}`);
 	io.info(`  sessions   (${origin("sessions")}): history=${sessions.historyPath}`);
 	io.info(`  ui         (${origin("ui")}): promptZone=${ui.promptZone}`);

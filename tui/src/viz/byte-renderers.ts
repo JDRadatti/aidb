@@ -16,12 +16,17 @@ import type {
 	Rect,
 	TupleOptions,
 } from "./types.ts";
+import { colors } from "../theme.ts";
 
-export const CHANGED = "\x1b[33m";
 export const RESET = "\x1b[0m";
 
+/**
+ * Change marking is the `warning` role (amber by default), read live so a
+ * /config reload re-colours existing panes. Replaces the old hard-coded
+ * `\x1b[33m`.
+ */
 export function mark(changed: boolean, text: string): string {
-	return changed ? CHANGED + text + RESET : text;
+	return changed ? colors.warning(text) : text;
 }
 
 /** `mark`, disabled when the render spec asks to hide changes. */
@@ -35,7 +40,7 @@ export function hasFlag(flags: ViewFlags | undefined, bit: ViewFlags): boolean {
 }
 
 function errorLines(snap: BindingSnapshot): string[] {
-	return [`✗ ${snap.error}`];
+	return [colors.error(`✗ ${snap.error}`)];
 }
 
 function memoryHeader(snap: BindingSnapshot, changedCount: number, shownBytes?: number, flags?: ViewFlags, typeLabel?: string): string {
@@ -160,7 +165,7 @@ function channelsFromTuple(
 
 function trueColorCell(r: number, g: number, b: number, changed: boolean, flags?: ViewFlags): string {
 	const cell = ` \x1b[38;2;${r};${g};${b}m${RESET}`;
-	return hasFlag(flags, ViewFlags.HIDE_CHANGES) ? cell : changed ? CHANGED + "▲" + RESET + cell : cell;
+	return hasFlag(flags, ViewFlags.HIDE_CHANGES) ? cell : changed ? colors.warning("▲") + cell : cell;
 }
 
 function missingBitmapOptions(options: BitmapOptions): string | undefined {

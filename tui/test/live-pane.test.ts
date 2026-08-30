@@ -186,12 +186,13 @@ describe("parseLoadSpec", () => {
 		}, "code", {} as never, { viewportHeight: 8 });
 
 		await view.refreshAll();
+		const plain = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const lines = view.render(80);
-		assert.equal(lines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
+		assert.equal(lines.map(plain).findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
 		for (const [index, instruction] of instructions.entries()) instruction.current = index === 28;
 		await view.refreshAll();
 		const movedLines = view.render(80);
-		assert.equal(movedLines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(movedLines));
+		assert.equal(movedLines.map(plain).findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(movedLines));
 	});
 
 	it("recenters the initial assembly instruction after the pane gets resized", async () => {
@@ -209,8 +210,9 @@ describe("parseLoadSpec", () => {
 
 		await view.refreshAll();
 		view.setViewportHeight(8);
+		const plain = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const lines = view.render(80);
-		assert.equal(lines.findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
+		assert.equal(lines.map(plain).findIndex((line) => line.startsWith("▶")), 4, JSON.stringify(lines));
 	});
 
 	it("refetches interleaved data with a larger source window after resize", async () => {
