@@ -1,35 +1,40 @@
 # TODO
 
-# PLANNING:
-- fuzzy find files
+# NEXT — do these first
+1. Named theme presets: a small set of built-in presets (dark/light/…) that
+   fill the existing theme.* roles in one config line, e.g. `theme: dracula`.
+   The role system + ui.promptZone already exist (DONE); this is just presets.
+2. Better watch visualizations: richer per-type renderers + value formatting
+   for the watch pane (see also TESTING STRATEGY) — structs/arrays
+   pretty-printed, not just scalar + to-string.
+3. Whole-memory pane: a `mem` view that renders a paged window over all of
+   program memory (base address + scroll/navigation) instead of a single
+   address.
+
+# PLANNING
+- fuzzy find files (open any file by fuzzy name/path)
 - session tags (release number, commit, gh issue, ...)
 - build tool?
-- whole-memory pane (mem of the program, not one address)
+- whole-memory pane (mem of the program, not one address) → NEXT 3
 - better pane navigation/controls/resizing (herdr-style? diff prefix?)
 - more gdb features?
-- named theme presets
 
-# ISSUES:
-- themes
-- clean up the / prmopt descriptions. instead of saying the args, it should just say the description. also, the session is save [name] where the other nouns are save <name>. 
-- still need to cleanup the intro prompt and the help prompt. i like having [] like [sessions] maybe on a new line and then on the next line indented is the first session and hten the next is the next session and so on. i think the intro prompt should just say the sessions targets and lyaouts? also, it should say something about /help for help and /sessing. maybe a /help for a more full description of the api. maybe a list of the debugging commands? 
-- would be nice to have [target: targetname] [session: sessionname] [layout: layoutname] in the bottom bar on the right? 
-- is the fuzzy finder working? when i do > to open a /open and then i type e, it does not filter just the e things, even though i have two called example
-- asm is not rendered ideally? maybe add some spacing? gdb make clear distinction
-  between src and func name   [FIXED: ANSI-aware column padding + distinct `function`
-  color role (95); interleaved gutters aligned]
-- layout watch windows are not saved when canceling and reopening.  [DECIDED:
-  no auto-save on layouts — sessions keep referencing named layouts; explicit
-  /layout save only]
-- display in gdb should still display after every step   [FIXED: `display <expr>` /
-  `undisplay <n>` / `info display` backed by the watch pane]
-- the commands with args should have a light colored text prompting the arg.
-  like /layout save <name> and name is a lighter color   [FIXED: `placeholder`
-  role (245) tints <args> in help + slash dropdown; fillKeys no longer mangles
-  placeholders into "—"]
-- better output visualizations for watch windows
-- there should be a mem pane that shows all the mem of the program. instead of
-  having to specify a address location
+# ISSUES
+- themes — per-role color config exists; there are no named presets → NEXT 1
+- better output visualizations for watch windows → NEXT 2
+- mem pane showing all of the program's memory, no address required → NEXT 3
+
+# DECIDED
+- layout watch windows are not saved when canceling/reopening: sessions keep
+  referencing the named layout; only explicit `/layout save` persists.
+
+# TESTING STRATEGY
+- once we get AI integration, the AI will be able to run the debugger and visualize the screen
+  we can enumerate every single feature and what it should look like. then, we can create an ai swarm
+  to try each of the features in random orders (need a graph of dependent features; test both valid graphs and invalid graphs)
+  we can try on different OSs with different versions with differenet screen sizes.
+- we can also task the AI to create a certain visualization and check output.
+- the watch windows are nice, but ideally would like to create better output visuzlations.
 
 # DONE — PickCaret / ctrl-keys in the fuzzy finder
 - every readline ctrl binding now works INSIDE the finder: ctrl+a/e (line
@@ -56,13 +61,41 @@
 - theme.inputBorder (default 240) colors the frame; /config reload re-applies
   it live. plan: prompt-band-plan.md.
 
-# TESTING STRATEGY
-- once we get AI integration, the AI will be able to run the debugger and visualize the screen 
-  we can enumerate every single feature and what it should look like. then, we can create an ai swarm 
-  to try each of the features in random orders (need a graph of dependent features; test both valid graphs and invalid graphs)
-  we can try on different OSs with different versions with differenet screen sizes. 
-- we can also task the AI to create a certain visualization and check output. 
-- the watch windows are nice, but ideally would like to create better output visuzlations.
+# DONE — intro banner lists saved items (previously NEXT 1)
+- `[sessions]` / `[targets]` / `[layouts]` tags, each followed by one
+  indented line per saved item (name ✳ marks the current one, same mark as
+  the pickers): sessions read `name · target · layout · bp N`, targets
+  `name · ./program [args]` (or `attach pid N`), layouts `name · N panes ·
+  M watch [· K live]`. Empty collections show a muted hint (auto-save off,
+  no target yet, /layout save ...).
+- banner trimmed to the three lists + the bare debugging verbs (run, break,
+  continue, next, step, finish, print, bt, info, display, watch) + a
+  `/help · /settings · \`>` — open anything saved` pointer; viz/keys/config/
+  history lines dropped. /help already carried the full command sheet.
+
+# DONE — slash hint grammar + bottom-bar tags (previously NEXT 2/3)
+- `/session` hint now reads `save <name>` like target/layout (was
+  `save [name]`); repl.ts doc comment updated to match.
+- the bottom bar pins `[target: x] [session: y] [layout: z]` to the right
+  edge (only while those names exist on disk — implicit UUID profiles count
+  once saved). Left keeps state/panes/bp/location + Alt+O hint; the tags
+  drop instead of wrapping when the terminal is too narrow.
+
+# DONE — other
+- fuzzy finder narrows by *name*, not group tag: `>` then typing `e` now
+  filters to just the two `example` targets (5478b03). picker.ts strips SGR
+  codes before matching and no longer fakes a match via the item's tag /
+  decoration text.
+- asm rendering: ANSI-aware column padding + a distinct `function` color role,
+  interleaved gutters aligned between source and asm (3417c94).
+- `display <expr>` / `undisplay <n>` / `info display` backed by the watch pane;
+  display entries re-evaluate after every step (d9b944c).
+- `<placeholder>` args tinted with the `placeholder` role (245) in help + the
+  slash dropdown; fillKeys no longer mangles placeholders into "—" (4a73ce8).
+- slash dropdown rows read `hint — description` where the description says
+  what the command *does* (e.g. "saved debugger sessions"), not its args.
+- new theme roles (semantic tokens, borders, placeholder, inputBorder) +
+  ui.promptZone config (595c977 / f1ea869).
 
 # Finished
 - would like Enter to replay the previous command, like in gdb
@@ -70,4 +103,3 @@
 - unnamed sessions/targets auto-save as noun-prefixed uuids (`session_<uuid>` / `target_<uuid>`, replacing `@<uuid>` / program-basename / "session") so they never collide and are always resume-able
 - going to prev with ctrl+p (or ArrowUp) should put cursor at the end
 - auto complete on tab should only fire when relevant (run/file paths, path-shaped tokens)
-
