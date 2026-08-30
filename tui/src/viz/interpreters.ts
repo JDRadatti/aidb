@@ -12,6 +12,7 @@
 import type { BindingSnapshot, InterleavedRow, Interpreter, ObservationCapability, Rect, VarNode } from "./types.ts";
 import { ViewFlags } from "./types.ts";
 import type { RenderSpec } from "./render-spec.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	makeBitmapInterpreter,
 	makeBytesInterpreter,
@@ -105,6 +106,17 @@ export function renderText(snap: BindingSnapshot): string[] {
 	return snap.lines ?? (snap.value === undefined ? ["waiting for data…"] : [snap.value]);
 }
 
+/**
+ * Pad `text` to `width` columns of VISIBLE width. `.padEnd` counts SGR
+ * escape bytes as characters, so a colored symbol (`<main>`) padded the naive
+ * way collapses the gap to nothing while an empty symbol leaves a wide hole —
+ * the instruction column wobbled between rows. `visibleWidth` strips the
+ * escapes; the padding then lands after the reset, leaving a stable column.
+ */
+function padVisible(text: string, width: number): string {
+	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
+}
+
 /** Render source or assembly with a compact current-location marker. */
 export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undefined, rect: Rect): string[] {
 	if (snap.error) return errorLines(snap);
@@ -119,8 +131,12 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 			const breakpoint = instruction.line === undefined ? undefined : snap.breakpoints?.find((candidate) => candidate.line === instruction.line);
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
 			const sourceLine = instruction.line === undefined ? "     " : String(instruction.line).padStart(5);
-			const symbol = currentSymbol ? `<${currentSymbol}>` : "";
-			return `${marker} ${breakpointMarker} ${sourceLine} ${colors.muted(instruction.address.padEnd(18))}${colors.bold(colors.accent(symbol)).padEnd(20)} ${highlightAsm(instruction.instruction)}`;
+			return formatInstruction(
+				`${marker} ${breakpointMarker} ${sourceLine} `,
+				instruction.address,
+				currentSymbol,
+				instruction.instruction,
+			);
 		});
 		return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 	}
@@ -140,6 +156,18 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 	});
 }
 
+/** One instruction row: gutter · address · function symbol · instruction. */
+function formatInstruction(gutter: string, address: string, symbol: string | undefined, instruction: string): string {
+	const symbolTag = symbol ? `<${symbol}>` : "";
+	// Address and symbol are padded to a fixed VISIBLE column footprint, so
+	// rows with and without a symbol line up (_that_ is the "gdb makes a clear
+	// distinction between src and func name" gap — the old padEnd counted
+	// escape bytes as characters and drifted by (18 - len) per row). The
+	// symbol gets its own color role (`function`) so it separates from the
+	// bold-accent mnemonic operands.
+	return `${gutter}${colors.muted(padVisible(address, 18))} ${colors.function(padVisible(symbolTag, 20))} ${highlightAsm(instruction)}`;
+}
+
 export function renderInterleaved(snap: BindingSnapshot): string[] {
 	if (snap.error) return errorLines(snap);
 	const rows = snap.interleaved ?? [];
@@ -153,9 +181,10 @@ export function renderInterleaved(snap: BindingSnapshot): string[] {
 			return row.current ? colors.accent(prefix) + highlightCode(row.text) : prefix + highlightCode(row.text);
 		}
 		const instruction = row.instruction;
-		const symbol = instruction.symbol ? `<${instruction.symbol}>` : "";
+		// The `│` gutter aligns with the code renderer's source rows (marker +
+		// 8 columns, pipe at index 9) so mapped lines line up under their source.
 		const marker = instruction.current ? "▶" : " ";
-		return `${marker}       │ ${colors.muted(instruction.address.padEnd(16))}${colors.bold(colors.accent(symbol)).padEnd(20)} ${highlightAsm(instruction.instruction)}`;
+		return formatInstruction(`${marker}        │ `, instruction.address, instruction.symbol, instruction.instruction);
 	});
 	return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;
 }

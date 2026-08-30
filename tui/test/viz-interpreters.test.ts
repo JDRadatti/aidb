@@ -229,6 +229,40 @@ describe("renderCode", () => {
 		assert.doesNotMatch(stripAnsi(lines[0]!), /55/);
 	});
 
+	it("keeps the instruction column pinned when symbols come and go (ANSI-aware pad)", () => {
+		// The old `.padEnd(20)` counted SGR escape bytes as characters: a row
+		// WITH `<main>` (escape-heavy) got zero padding while a row without a
+		// symbol got ~10 spaces, so the instruction column wobbled per row.
+		const lines = renderCode({
+			kind: "assembly",
+			instructions: [
+				{ address: "0x401126", symbol: "main", instruction: "push %rbp" },
+				{ address: "0x401127", instruction: "nop" },
+				{ address: "0x401128", symbol: "long_function_name", instruction: "ret" },
+			],
+		}, undefined, WIDE);
+
+		const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+		const instrStart = (row: string): number => row.indexOf("push %rbp") >= 0
+			? row.indexOf("push %rbp")
+			: row.indexOf("nop") >= 0 ? row.indexOf("nop") : row.indexOf("ret");
+		const starts = plain.map(instrStart);
+		assert.equal(starts[0], starts[1], `rows align despite the missing symbol: ${JSON.stringify(plain)}`);
+		assert.equal(starts[0], starts[2], `rows align despite the long symbol: ${JSON.stringify(plain)}`);
+	});
+
+	it("colors the symbol with its own role, distinct from the mnemonic", () => {
+		const [line] = renderCode({
+			kind: "assembly",
+			instructions: [{ address: "0x401126", symbol: "main", instruction: "push %rbp" }],
+		}, undefined, WIDE);
+		// `<main>` is wrapped in the `function` role (\x1b[95m), the mnemonic
+		// keeps its existing bold-accent wrap (\x1b[1m\x1b[36m) — the two no
+		// longer share one look, which is what merged them before.
+		assert.match(line!, /\x1b\[95m<main>[ ]+\x1b\[0m/);
+		assert.match(line!, /\x1b\[1m\x1b\[36mpush\x1b\[0m/);
+	});
+
 	it("renders source lines with mapped instructions beneath them", () => {
 		const lines = renderInterleaved({
 			kind: "interleaved",
