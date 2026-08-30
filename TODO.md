@@ -1,13 +1,25 @@
 # TODO
+- new sessions should start new history and just say [session 'sessionname' activated] at the top. 
+- improve ux/readability/colors and spacing between things. related things should be grouped together and not related things should be separated by a line. 
+- need a ux for things we want to make sure about, like run command 
+- ctrl+l to refresh history (like in command prompto)
+- sessions should maybe be forced saved as well?
+- open new files.
+- embed nvim?
+- what happens when we resume a non-exisstent session
+- breakpoint extends to all assembly llanguage under a source line.
+- on llm changes, we should have a git diff that we can step thorough. llm should be able to 
+- mmaybe in the future this would be good: 1. prompt the llm to make a fix. they will do so then they set up a debug session that you can step through.
+- for example, it could walk you through a bug (show you the data 
+- each change could also do data diffs or just correlate the data with what was just changed (maybe the data that touches the diff should be also diffed)
+- the vertical lines to the left of the source code is separated, but combined in asm. it should be combined in both and muted.
+
 
 # NEXT — do these first
-1. Named theme presets: a small set of built-in presets (dark/light/…) that
-   fill the existing theme.* roles in one config line, e.g. `theme: dracula`.
-   The role system + ui.promptZone already exist (DONE); this is just presets.
-2. Better watch visualizations: richer per-type renderers + value formatting
+1. Better watch visualizations: richer per-type renderers + value formatting
    for the watch pane (see also TESTING STRATEGY) — structs/arrays
    pretty-printed, not just scalar + to-string.
-3. Whole-memory pane: a `mem` view that renders a paged window over all of
+2. Whole-memory pane: a `mem` view that renders a paged window over all of
    program memory (base address + scroll/navigation) instead of a single
    address.
 
@@ -15,14 +27,13 @@
 - fuzzy find files (open any file by fuzzy name/path)
 - session tags (release number, commit, gh issue, ...)
 - build tool?
-- whole-memory pane (mem of the program, not one address) → NEXT 3
+- whole-memory pane (mem of the program, not one address) → NEXT 2
 - better pane navigation/controls/resizing (herdr-style? diff prefix?)
 - more gdb features?
 
 # ISSUES
-- themes — per-role color config exists; there are no named presets → NEXT 1
-- better output visualizations for watch windows → NEXT 2
-- mem pane showing all of the program's memory, no address required → NEXT 3
+- better output visualizations for watch windows → NEXT 1
+- mem pane showing all of the program's memory, no address required → NEXT 2
 
 # DECIDED
 - layout watch windows are not saved when canceling/reopening: sessions keep
@@ -35,6 +46,38 @@
   we can try on different OSs with different versions with differenet screen sizes.
 - we can also task the AI to create a certain visualization and check output.
 - the watch windows are nice, but ideally would like to create better output visuzlations.
+
+# DONE — principled highlighting (option A: regex, lexer reverted)
+- source/asm highlighting is per-line regex + keyword set (same shape gdb uses
+  via source-highlight): one `matchAll` per line; block comments colour only
+  on their terminating line (accepted, matches gdb without source-highlight).
+- kind→role map lives in one switch in theme.ts (`colors.syntaxRole` /
+  `colors.asmRole`), read live on /config reload.
+- the original asm role bug is FIXED: the first identifier is the mnemonic
+  (`mnemonic` role); later identifiers are symbols (`function` role). The old
+  regex had it backwards (bold-accent on the mnemonic, magenta on operands).
+- `#include`/`#define` are a preprocessor token (directive role), not a
+  whole-line bold-accent shortcut.
+- change-marking (`mark`, bitmap ▲) uses the live `warning` role, not a
+  hard-coded `\x1b[33m`; error lines use `colors.error`.
+- `readSource` caches split file lines per path (16-file LRU), so stops don't
+  re-read + re-split the file. (The one kept perf win; the lexer's window
+  cache was reverted with the rest of viz/syntax.ts.)
+- syntax-highlighting-plan.html documents this strategy (regenerate with
+  node --experimental-strip-types /tmp/gen-syntax-playground.mjs).
+
+# DONE — named theme presets (previously NEXT 1)
+- `theme: "<name>"` selects a preset in one config line; `theme: { preset:
+  "<name>", accent: 9 }` layers per-role overrides on top of a preset.
+  Presets are ports of herdr's classic palettes (herdr `src/app/state.rs`
+  `Palette`): catppuccin (+ latte), tokyo-night (+ day), dracula, nord,
+  gruvbox (+ light), one-dark (+ light), solarized (+ light), kanagawa
+  (+ lotus), rose-pine (+ dawn), vesper — herdr's UI roles mapped onto aidb's
+  theme.* roles, RGB converted to the nearest xterm-256 code (the `terminal`
+  pass-through is omitted: aidb roles are already 256-colour codes). herdr's
+  theme-name aliases (tokyonight, onedark, gruvbox-dark, dawn, ...) resolve
+  via canonicalThemeName; unknown names fall back to the default palette with
+  a config issue (path `theme` / `theme.preset`). /settings lists presets.
 
 # DONE — PickCaret / ctrl-keys in the fuzzy finder
 - every readline ctrl binding now works INSIDE the finder: ctrl+a/e (line
