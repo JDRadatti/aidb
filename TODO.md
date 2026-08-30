@@ -3,6 +3,7 @@
 # ISSUES: 
 - themes
 - fuzzy find files
+- ctrl+ commands for prompt, like ctrl+u do not work when fuzzy finder is open
 - add gdb features?
 - asm is not rendered ideally? maybe add some spacing? gdb make clear distinction between src and func name
 - better pane navigation/controls/resizing/etc... i like how herdr does it, but i can't really have that be the same, can I? maybe i can with a diff prefix?
@@ -11,6 +12,7 @@
 - display in gdb should still display after every step
 - layout watch windows are not saved. when canceling app and reopening, the source panes should reain the source panes. 
 - the commands with args should have a light colored text prompting teh arg. like /layout save <name> and name is a lighter color 
+- the prompt input + fuzzy + popup area should be a different color so it is more visible
 - there should be a mem pane that shows all the mem of the program. instead of having to specify a address loacation
 
 # TESTING STRATEGY
@@ -26,7 +28,5 @@
 - closing clears the output and prints "Resume session with: aidb -r <name>" (`-r <name>` = short alias for `--session <name>`)
 - unnamed sessions/targets auto-save as noun-prefixed uuids (`session_<uuid>` / `target_<uuid>`, replacing `@<uuid>` / program-basename / "session") so they never collide and are always resume-able
 - going to prev with ctrl+p (or ArrowUp) should put cursor at the end
-- pressing delete on a fuzzy should cancel it
 - auto complete on tab should only fire when relevant (run/file paths, path-shaped tokens)
-- the prompt input + fuzzy + popup area should be a different color so it is more visible
 
