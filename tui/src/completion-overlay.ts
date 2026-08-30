@@ -21,6 +21,7 @@
 
 import {
 	type Component,
+	type EditorOptions,
 	type EditorTheme,
 	Editor,
 	getKeybindings,
@@ -29,6 +30,9 @@ import {
 	type TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { colors } from "./theme.ts";
+import type { PromptZone } from "./config.ts";
+import { pickerActive } from "./picker.ts";
 
 /** The pieces of Editor's autocomplete state the stripper needs. */
 interface EditorInternals {
@@ -62,12 +66,19 @@ function internalsOf(editor: Editor): EditorInternals | null {
 export class AidbEditor extends Editor {
 	private internals: EditorInternals | null | undefined;
 
+	/** Zone-frame level ("off" = stock). The rail + top-line logic live here. */
+	promptZone: PromptZone = "off";
+
 	/** Suggestion lines stripped out of the last render, or null when inactive. */
 	dropdownLines: readonly string[] | null = null;
 
 	/** Rows the editor itself occupied in the last render (dropdown excluded). */
 	lastHeight = 3;
 
+	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}, promptZone: PromptZone = "off") {
+		super(tui, theme, options);
+		this.promptZone = promptZone;
+	}
 	/**
 	 * Seed the up/down history from a persisted file.
 	 * The file stores most-recent-first (matching `Editor.history`, where
@@ -194,39 +205,73 @@ export class AidbEditor extends Editor {
 	}
 
 	render(width: number): string[] {
-		const result = super.render(width);
+		// With the `line+rail` frame, one column is reserved for the left rail:
+		// the editor lays out its content one cell narrower and `frame` adds
+		// the rail back, so the block cursor (a highlighted char IN the string)
+		// stays visually correct. Default "off" renders *byte-identical* to
+		// stock — the existing equivalence tests rely on that.
+		const railWidth = this.promptZone === "line+rail" ? 1 : 0;
+		const inner = Math.max(1, width - railWidth);
+		const result = super.render(inner);
 		this.internals ??= internalsOf(this);
 		const intern = this.internals;
-		const inactive = (): void => {
-			this.dropdownLines = null;
-			this.lastHeight = result.length;
-		};
+		let out: string[];
 		if (!intern || intern.autocompleteState() === null || !intern.autocompleteList()) {
-			inactive();
-			return result;
+			this.dropdownLines = null;
+			out = railWidth ? this.frame(result, inner, width) : result;
+		} else {
+			// Mirror Editor.render's width bookkeeping exactly so the recomputed
+			// block matches what stock would have appended (at the inner width).
+			const maxPadding = Math.max(0, Math.floor((inner - 1) / 2));
+			const paddingX = Math.min(intern.paddingX(), maxPadding);
+			const contentWidth = Math.max(1, inner - paddingX * 2);
+			const leftPadding = " ".repeat(paddingX);
+			const rightPadding = leftPadding;
+			const expected = intern.autocompleteList()!.render(contentWidth).map((line) => {
+				const lineWidth = visibleWidth(line);
+				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
+				return `${leftPadding}${line}${linePadding}${rightPadding}`;
+			});
+			const start = result.length - expected.length;
+			const tail = start >= 0 ? result.slice(start) : [];
+			const matches = tail.length === expected.length && tail.every((line, i) => line === expected[i]);
+			if (!matches) {
+				// Upstream layout changed; fall back to inline rendering.
+				this.dropdownLines = null;
+				out = railWidth ? this.frame(result, inner, width) : result;
+			} else {
+				this.dropdownLines = expected;
+				out = result.slice(0, start);
+				if (railWidth) out = this.frame(out, inner, width);
+			}
 		}
-		// Mirror Editor.render's width bookkeeping exactly so the recomputed
-		// block matches what stock would have appended.
-		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
-		const paddingX = Math.min(intern.paddingX(), maxPadding);
-		const contentWidth = Math.max(1, width - paddingX * 2);
-		const leftPadding = " ".repeat(paddingX);
-		const rightPadding = leftPadding;
-		const expected = intern.autocompleteList()!.render(contentWidth).map((line) => {
-			const lineWidth = visibleWidth(line);
-			const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-			return `${leftPadding}${line}${linePadding}${rightPadding}`;
+		// While a band (dropdown or fuzzy picker) is composited above the
+		// prompt, the overlay's divider takes over as the zone's top line —
+		// drop the editor's own top border so the two never stack. The editor
+		// sees the picker/dropdown state in the SAME composite (picker state
+		// changes before render; dropdownLines is computed above), so there's
+		// no stale-frame flash.
+		if (this.promptZone !== "off" && (this.dropdownLines !== null || pickerActive()) && out.length > 0) {
+			out = out.slice(1);
+		}
+		this.lastHeight = out.length;
+		return out;
+	}
+
+	/** Add the left rail and re-stretch the border rows back to full width. */
+	private frame(rows: readonly string[], inner: number, width: number): string[] {
+		return rows.map((row, index) => {
+			if (index === 0 || index === rows.length - 1) return this.rebuildBorder(row, inner, width);
+			return colors.inputBorder("│") + row;
 		});
-		const start = result.length - expected.length;
-		const tail = start >= 0 ? result.slice(start) : [];
-		const matches = tail.length === expected.length && tail.every((line, i) => line === expected[i]);
-		if (!matches) {
-			inactive(); // upstream layout changed; fall back to inline rendering
-			return result;
-		}
-		this.dropdownLines = expected;
-		this.lastHeight = start;
-		return result.slice(0, start);
+	}
+
+	/** A border row (rendered inner-wide) re-stretched to `width`. */
+	private rebuildBorder(row: string, inner: number, width: number): string {
+		const plain = row.replace(/\x1b\[[0-9;]*m/g, "");
+		if (plain === "─".repeat(inner)) return this.borderColor("─".repeat(width));
+		// Scroll-indicator border (─── ↑ N more …): extend the dashes.
+		return this.borderColor(plain + "─".repeat(Math.max(0, width - plain.length)));
 	}
 }
 
@@ -251,6 +296,14 @@ export interface DropdownOverlayOptions {
 	 * Read live each pass, so sources can be registered/unregistered.
 	 */
 	sources?: OverlayLineSource[];
+	/**
+	 * Input-zone frame, read live each pass: `line` draws a divider above the
+	 * band ("the line above the prompt is also above the popups");
+	 * `line+rail` also adds a left rail in `theme.inputBorder` and reserves a
+	 * column (the editor mirrors it on the prompt line itself). `off` =
+	 * today's chrome-less band.
+	 */
+	promptZone?: () => PromptZone;
 }
 
 export interface DropdownOverlayHandle {
@@ -292,16 +345,48 @@ export function attachDropdownOverlay(
 	const component: Component = {
 		invalidate(): void {},
 		render(width: number): string[] {
-			// Read fresh every composite pass; resolveOverlayLayout re-runs after
-			// this returns, so the mutated offset applies to this very frame.
-			overlayOptions.offsetY = -(rowsBelow() + editor.lastHeight);
+			const zone = options.promptZone?.() ?? "off";
+			// line+rail reserves one column for the rail on band rows; sources
+			// (and the editor's own stashed dropdown, already inner-wide) get the
+			// narrower width so rail + rows = exactly `width`.
+			const railWidth = zone === "line+rail" ? 1 : 0;
+			const inner = Math.max(1, width - railWidth);
 			// Custom sources first (first non-empty wins), then the editor's own
 			// dropdown. `sources` is read live so callers can register/unregister.
+			let lines: readonly string[] | null = null;
 			for (const source of options.sources ?? []) {
-				const lines = source(width);
-				if (lines && lines.length > 0) return [...lines];
+				const candidate = source(inner);
+				if (candidate && candidate.length > 0) {
+					lines = candidate;
+					break;
+				}
 			}
-			return [...(editorDropdownSource(editor)(width) ?? [])];
+			if (!lines || lines.length === 0) {
+				const editorLines = editorDropdownSource(editor)(inner);
+				if (editorLines && editorLines.length > 0) lines = editorLines;
+			}
+			const banded = lines !== null && lines.length > 0;
+			// Read fresh every composite pass; resolveOverlayLayout re-runs after
+			// this returns, so the mutated offset applies to this very frame.
+			// While a framed zone (`line`/`line+rail`) has a band up, the editor
+			// suppresses its own top border (a band row takes its place): it renders
+			// one fewer line AND that freed row becomes the prompt's row — the
+			// prompt climbs into the row the top border used to occupy, which is
+			// the exact row the band's bottom edge docks on. The base document also
+			// shrinks by one row, so the band must rise a full two rows above the
+			// naive `-(rowsBelow + lastHeight)`: +1 for the dropped border height
+			// (lastHeight 3→2) and +1 because the prompt moved up into that border
+			// row. Without it the band's last row sits on the prompt line and the
+			// prompt disappears under the popup.
+			overlayOptions.offsetY = -(
+				rowsBelow() + editor.lastHeight + (zone !== "off" && banded ? 2 : 0)
+			);
+			if (!lines || lines.length === 0) return [];
+			if (zone === "off") return [...lines];
+			// The frame: a divider above the band (the zone's top line) and,
+			// with line+rail, a rail on every band row.
+			const railed = railWidth === 1 ? lines.map((line) => colors.inputBorder("│") + line) : [...lines];
+			return [colors.inputBorder("─".repeat(width)), ...railed];
 		},
 	};
 

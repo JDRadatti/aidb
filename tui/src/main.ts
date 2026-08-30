@@ -712,6 +712,19 @@ function reloadConfig(): { config: Config; sources: ConfigSources } {
 	const loaded = loadAndApplyConfig();
 	config = loaded.config;
 	configSources = loaded.sources;
+	// The editor is created after the startup config load; from then on a
+	// reload re-themes it live (border + autocomplete dropdown roles) and
+	// re-applies the prompt-zone frame level.
+	if (editor) {
+		const editorTheme = createEditorTheme(config.theme);
+		// pi-tui's Editor.theme is a private field with no setter; re-assign it
+		// via the shape-probe the dropdown stripper already uses, so an upstream
+		// reshuffle degrades to border-only instead of mangling the editor.
+		const rec = editor as unknown as { theme?: unknown };
+		if (rec.theme) rec.theme = editorTheme;
+		editor.borderColor = editorTheme.borderColor;
+		editor.promptZone = config.ui.promptZone;
+	}
 	return loaded;
 }
 
@@ -778,7 +791,7 @@ function persistHistory(entry: string): void {
 	}
 }
 
-const editor = new AidbEditor(tui, createEditorTheme(config.theme));
+const editor = new AidbEditor(tui, createEditorTheme(config.theme), undefined, config.ui.promptZone);
 editor.setAutocompleteMaxVisible(10);
 editor.setAutocompleteProvider(new AidbCompletionProvider(buildCommandRegistry(), replCtx, process.cwd()));
 editor.onSubmit = (text: string) => {
@@ -787,9 +800,12 @@ editor.onSubmit = (text: string) => {
 // The single prompt-band overlay. The slash dropdown renders through it on its
 // own; the fuzzy picker registers as an extra source so it draws through the
 // SAME full-width, chrome-less band with identical geometry (live `offsetY`).
+// promptZone frames the whole zone (divider above the band; `line+rail` also
+// adds a left rail) — read live so /config reload restyles it immediately.
 attachDropdownOverlay(tui, editor, {
 	maxHeight: "80%",
 	sources: [pickerLineSource],
+	promptZone: () => config.ui.promptZone,
 });
 
 // The fuzzy picker needs the TUI surface (key capture + a repaint trigger);
@@ -798,8 +814,16 @@ installPickerHost({
 	addInputListener: (listener) => tui.addInputListener(listener),
 	requestRender: () => tui.requestRender(),
 	// The finder's query lives in the real prompt as `> <query>`, like cursor's
-	// fuzzy finder; the editor keeps the block cursor at the end of the text.
+	// fuzzy finder; the editor keeps the block cursor after the text.
 	setPromptText: (text) => editor.setText(text),
+	// ctrl+a/e/b/f inside the finder move the caret into the query — moved by
+	// re-positioning the editor's cursor (pi-tui keeps setCursorCol private;
+	// shape-probe like the dropdown stripper, so a reshuffle degrades to the
+	// caret staying at the end).
+	setPromptCaret: (col) => {
+		const rec = editor as unknown as { setCursorCol?: (col: number) => void };
+		if (typeof rec.setCursorCol === "function") rec.setCursorCol(col);
+	},
 });
 
 // Seed this session's history from the persisted file (most-recent-first).

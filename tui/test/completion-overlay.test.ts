@@ -15,6 +15,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { AidbEditor, attachDropdownOverlay, type OverlayLineSource } from "../src/completion-overlay.ts";
+import { installPickerHost, openPicker, pickerLineSource } from "../src/picker.ts";
 import { createEditorTheme } from "../src/theme.ts";
 
 const WIDTH = 100;
@@ -308,6 +309,104 @@ describe("AidbEditor dropdown dismissal", () => {
 });
 
 describe("attachDropdownOverlay", () => {
+	it("promptZone \"line\" draws a divider above the band; band rows stay untouched", async () => {
+		const { tui, entries } = stubTui();
+		const editor = new AidbEditor(tui, createEditorTheme());
+		const sources: OverlayLineSource[] = [];
+		attachDropdownOverlay(tui, editor, { sources, promptZone: () => "line" });
+		const entry = entries[0];
+		sources.push(() => ["item one", "item two"]);
+
+		const band = entry.component.render(WIDTH).map(plain);
+		assert.equal(band.length, 3);
+		assert.match(band[0]!, /^─{100}$/, "the divider spans the full band width");
+		assert.equal(band[1], "item one", "band rows are not rail-prefixed at the `line` level");
+		assert.equal(band[2], "item two");
+
+		// Spent band: no divider lingers.
+		sources.length = 0;
+		assert.deepEqual(entry.component.render(WIDTH), [], "no band -> no frame at all");
+	});
+
+	it("promptZone \"line+rail\" railes every band row under the divider", async () => {
+		const { tui, entries } = stubTui();
+		const editor = new AidbEditor(tui, createEditorTheme());
+		const sources: OverlayLineSource[] = [];
+		attachDropdownOverlay(tui, editor, { sources, promptZone: () => "line+rail" });
+		const entry = entries[0];
+		sources.push((width) => ["item", "footer"].map((s) => s.slice(0, Math.max(1, width))));
+
+		const band = entry.component.render(WIDTH).map(plain);
+		assert.equal(band.length, 3);
+		assert.match(band[0]!, /^─{100}$/, "divider is full width");
+		assert.equal(band[1], "│item", "band row gets the left rail");
+		assert.equal(band[2], "│footer");
+	});
+
+	it("promptZone \"line\" drops the editor's top border while a dropdown is up", async () => {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme(), {}, "line");
+		const idle = aidb.render(WIDTH).map(plain);
+		assert.equal(idle.length, 3, "idle prompt keeps its top border");
+		assert.match(idle[0]!, /^─{100}$/);
+
+		await activateAndRender(aidb, { tui });
+		const banded = aidb.render(WIDTH).map(plain);
+		assert.ok(aidb.dropdownLines, "dropdown is stashed");
+		assert.equal(banded.length, 2, "top border replaced by the overlay divider");
+		assert.doesNotMatch(banded[0]!, /^─{100}$/, "content row is first while banded");
+		assert.match(banded[1]!, /^─{100}$/, "bottom border remains full width");
+	});
+
+	it("promptZone \"line+rail\" frames the prompt line too (rail + full-width borders)", async () => {
+		const { tui } = stubTui();
+		const aidb = new AidbEditor(tui, createEditorTheme(), {}, "line+rail");
+		aidb.setText("hi");
+		const lines = aidb.render(WIDTH).map(plain);
+		assert.equal(lines.length, 3);
+		assert.match(lines[0]!, /^─{100}$/, "top border stretched to full width around the rail");
+		assert.match(lines[1]!, /^│/, "content line starts with the rail");
+		assert.ok(lines[1]!.includes("hi"), "the prompt text survives beside the rail");
+		assert.match(lines[2]!, /^─{100}$/, "bottom border stretched too");
+
+		// Banded: rail stays on the content, the top border goes (divider's job).
+		// Activate a REAL dropdown: the slash must head the line to trigger.
+		aidb.setText("");
+		await activateAndRender(aidb, { tui });
+		assert.ok(aidb.dropdownLines, "dropdown stashed before the banded render");
+		const banded = aidb.render(WIDTH).map(plain);
+		assert.equal(banded.length, 2, "top border dropped while banded");
+		assert.match(banded[0]!, /^│/, "content keeps its rail while the band is up");
+		assert.match(banded[1]!, /^─{100}$/);
+	});
+
+	it("compensates the overlay offset for the dropped top border so the band never lands on the prompt", async () => {
+		const { tui, entries } = stubTui();
+		const editor = new AidbEditor(tui, createEditorTheme(), {}, "line");
+		const rowsBelow = 3;
+		attachDropdownOverlay(tui, editor, { rowsBelow: () => rowsBelow, promptZone: () => "line" });
+		const entry = entries[0];
+
+		// No band: the editor keeps its top border (lastHeight 3), no compensation.
+		assert.deepEqual(entry.component.render(WIDTH), []);
+		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight));
+
+		// Banded: the editor stripped a line (lastHeight 2) and the prompt climbed
+		// into the freed border row, which is exactly where the band's bottom edge
+		// docks — so the band must rise two rows above the naive formula.
+		await activateAndRender(editor, { tui });
+		assert.ok(editor.dropdownLines, "dropdown stashed while banded");
+		assert.equal(editor.lastHeight, 2, "top border suppressed while banded");
+		assert.ok(entry.component.render(WIDTH).length > 0);
+		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight + 2));
+
+		// Spent band: compensation drops back off.
+		editor.handleInput("\x1b");
+		editor.render(WIDTH);
+		assert.deepEqual(entry.component.render(WIDTH), []);
+		assert.equal(entry.options.offsetY, -(rowsBelow + editor.lastHeight));
+	});
+
 	it("renders the dropdown above the prompt via a non-capturing overlay", async () => {
 		const { tui, entries } = stubTui();
 		const editor = new AidbEditor(tui, createEditorTheme());
@@ -382,6 +481,8 @@ function pickerBand(width: number): string[] {
 	return [item.slice(0, Math.max(1, width)), "↑/↓ move · Enter select · Esc cancel"];
 }
 
+const plain = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+
 describe("TuiMainScreen integration", () => {
 	/** Full-render line count of the last frame appended to `writes`. */
 	function lastFrameLineCount(writes: string[], from: number): number {
@@ -417,7 +518,7 @@ describe("TuiMainScreen integration", () => {
 		};
 	}
 
-	async function setupScreen(): Promise<{
+	async function setupScreen(promptZone: "off" | "line" | "line+rail" = "off"): Promise<{
 		tui: TuiMainScreen;
 		editor: AidbEditor;
 		input(data: string): void;
@@ -430,12 +531,15 @@ describe("TuiMainScreen integration", () => {
 		// fight the scrollback the way it does in the real app.
 		for (let i = 0; i < 40; i++) transcript.addChild(new Text(`history-${i}`));
 		const statusBar = new Text("");
-		const editor = new AidbEditor(screen.tui, createEditorTheme());
+		const editor = new AidbEditor(screen.tui, createEditorTheme(), {}, promptZone);
 		editor.setAutocompleteProvider(fakeProvider());
 		screen.tui.addChild(transcript);
 		screen.tui.addChild(statusBar);
 		screen.tui.addChild(editor);
-		attachDropdownOverlay(screen.tui, editor, { rowsBelow: () => statusBar.render(100).length });
+		attachDropdownOverlay(screen.tui, editor, {
+			rowsBelow: () => statusBar.render(100).length,
+			promptZone: () => promptZone,
+		});
 		screen.tui.setFocus(editor);
 		screen.tui.start();
 		await flush();
@@ -445,6 +549,63 @@ describe("TuiMainScreen integration", () => {
 		await flush();
 		return { ...screen, editor };
 	}
+
+	it("a framed popup band never covers the prompt (real-app geometry)", async () => {
+		// The real app's window pane renders exactly `terminal.rows - editor(3) -
+		// statusBar(1)` rows, so the base document fills the terminal in idle and
+		// shrinks to rows-1 while a band is up. Both matter to the overlay offset.
+		const screen = screenTui(100, 24);
+		const filler: Component = {
+			invalidate(): void {},
+			render(width: number) {
+				return Array.from({ length: 20 }, () => " ".repeat(width));
+			},
+		};
+		const statusBar = new Text("status", 0, 0);
+		const editor = new AidbEditor(screen.tui, createEditorTheme(), {}, "line");
+		screen.tui.addChild(filler);
+		screen.tui.addChild(editor);
+		screen.tui.addChild(statusBar);
+		attachDropdownOverlay(screen.tui, editor, {
+			sources: [pickerLineSource],
+			promptZone: () => "line",
+		});
+		installPickerHost({
+			addInputListener: (listener) => screen.tui.addInputListener(listener),
+			requestRender: () => screen.tui.requestRender(),
+			setPromptText: (text) => editor.setText(text),
+		});
+		screen.tui.setFocus(editor);
+		screen.tui.start();
+		await flush();
+
+		openPicker({
+			title: "resume session",
+			items: [
+				{ value: "alpha", label: "alpha" },
+				{ value: "beta", label: "beta" },
+			],
+			onPick: () => {},
+		});
+		screen.tui.requestRender(true);
+		await flush();
+
+		const composed = screen.tui.compositeOverlays(screen.tui.render(100), 100, 24).map(plain);
+		const bandRows: number[] = [];
+		let promptRow = -1;
+		for (let i = 0; i < composed.length; i++) {
+			const line = composed[i]!;
+			if (line.includes("alpha") || line.includes("Esc cancel")) bandRows.push(i);
+			if (line.includes("> ")) promptRow = i;
+		}
+		assert.ok(bandRows.length > 0, "picker band composited");
+		assert.ok(promptRow !== -1, "prompt visible");
+		assert.equal(
+			Math.max(...bandRows),
+			promptRow - 1,
+			`band bottom (row ${Math.max(...bandRows)}) sits exactly one row above the prompt (row ${promptRow})`,
+		);
+	});
 
 	it("document height is unchanged while the dropdown is open or after it closes", async () => {
 		const { tui, editor, input, writes } = await setupScreen();
