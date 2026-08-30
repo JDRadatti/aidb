@@ -117,8 +117,9 @@ export interface SessionState {
 	name: string;
 	/**
 	 * Stable per-session UUID. Implicit (unset) target/layout profiles are
-	 * named `@<id>` so two sessions named "session" (or a renamed one) never
-	 * collide or cross-write each other's scratch profiles.
+	 * named `target_<id>`, and unnamed sessions auto-save as `session_<id>`,
+	 * so two unnamed sessions — even of the same program — never collide or
+	 * cross-write each other's scratch profiles.
 	 */
 	id?: string;
 	/** Name of a target profile, or null when no target. */
@@ -301,12 +302,14 @@ function readSession(raw: unknown): SessionState | { error: string } {
 /* ------------------------------------------------------------ keyed json store */
 
 /**
- * Namespace an implicit profile (`@<key>`) so a fresh session never writes
- * into a shared default that another session references. Explicit profiles
- * (set via running a program / `/layout save`) come through unchanged.
+ * Name an implicit (unnamed) profile with its noun so a fresh session never
+ * writes into a shared default that another session references: unnamed
+ * sessions auto-save as `session_<key>` and their implicit target profile as
+ * `target_<key>`. Explicit profiles (set via `/session save`, `/target save`,
+ * `/layout save`, or a program name) come through unchanged.
  */
-export function sessionScopedName(key: string): string {
-	return `@${key}`;
+export function implicitProfileName(noun: string, key: string): string {
+	return `${noun}_${key}`;
 }
 
 /** A fresh stable per-session id (UUID). */

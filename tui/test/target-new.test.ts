@@ -28,7 +28,7 @@ function makeHooks(rec: Recorder, over: { activeLayout?: string | null } = {}): 
 		setCurrent: () => {},
 		remove: async () => {},
 		startNew: async (name?: string) => {
-			rec.startNewCalls.push(name?.trim() || "session");
+			rec.startNewCalls.push(name?.trim() || undefined);
 		},
 		restore: async () => {},
 		targets: {
@@ -172,9 +172,9 @@ describe("new", () => {
 		assert.deepEqual(rec.startNewCalls, ["bugfix"]);
 	});
 
-	it("/new with no name defaults to 'session'", async () => {
+	it("/new with no name starts an unnamed session (uuid-named on save)", async () => {
 		const { ctx, rec } = makeContext({ withSessions: true });
 		await handleReplInput("/new", ctx);
-		assert.deepEqual(rec.startNewCalls, ["session"]);
+		assert.deepEqual(rec.startNewCalls, [undefined]);
 	});
 });

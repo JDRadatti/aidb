@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { createStores, LAYOUT_SCHEMA_VERSION, newSessionId, SESSION_SCHEMA_VERSION, sessionScopedName, TARGET_SCHEMA_VERSION } from "../src/session-store.ts";
+import { createStores, LAYOUT_SCHEMA_VERSION, implicitProfileName, newSessionId, SESSION_SCHEMA_VERSION, TARGET_SCHEMA_VERSION } from "../src/session-store.ts";
 
 /** Root dir; sessions live in `root/sessions`, targets/layouts in siblings. */
 function tmp(over: { seedSessions?: string[]; seedTargets?: string[]; seedLayouts?: string[] } = {}): {
@@ -219,12 +219,12 @@ describe("workspace stores (3-way split)", () => {
 		// Regression: creating a new session used to flush an EMPTY layout into
 		// a shared "default". Even session-NAME-based scoping fails when two
 		// sessions share a name ("session") or are renamed. A per-session UUID
-		// guarantees distinct implicit profiles. (Layouts are explicit-only now,
-		// but targets still auto-save under `@<id>` and rely on this.)
-		const fooLayout = sessionScopedName(newSessionId());
-		const barLayout = sessionScopedName(newSessionId());
+		// guarantees distinct implicit profiles, noun-prefixed (`session_<uuid>`
+		// sessions, `target_<uuid>` targets).
+		const fooLayout = implicitProfileName("layout", newSessionId());
+		const barLayout = implicitProfileName("layout", newSessionId());
 		assert.notEqual(fooLayout, barLayout, "distinct sessions get distinct implicit profiles");
-		assert.match(fooLayout, /^@[0-9a-f-]{36}$/i);
+		assert.match(fooLayout, /^layout_[0-9a-f-]{36}$/i);
 
 		await s.layouts.save({
 			schemaVersion: LAYOUT_SCHEMA_VERSION, name: fooLayout,

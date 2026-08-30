@@ -50,8 +50,8 @@ import { LivePaneView } from "./views/live-pane.ts";
 import { specFromBinding } from "./viz/bindings.ts";
 import {
 	createStores,
+	implicitProfileName,
 	newSessionId,
-	sessionScopedName,
 	TARGET_SCHEMA_VERSION,
 	LAYOUT_SCHEMA_VERSION,
 	SESSION_SCHEMA_VERSION,
@@ -212,7 +212,7 @@ function store(): StateStores {
 
 /**
  * The active session's stable identity (UUID). Implicit target/layout profiles
- * are named `@<uuid>` so "session"-named or renamed sessions never collide.
+ * are named `target_<uuid>` so "session"-named or renamed sessions never collide.
  * A fresh UUID is minted per `startNew`; restoring a session adopts its id.
  */
 let sessionId: string | null = null;
@@ -233,8 +233,9 @@ function activeTargetName(): string | null {
 	if (explicit) return explicit;
 	const t = getLastLaunch();
 	if (!t) return null;
-	// Per-session implicit name keyed by the session's stable UUID.
-	return sessionScopedName(currentSessionId());
+	// Per-session implicit name keyed by the session's stable UUID
+	// (`target_<uuid>`), unique across every session it belongs to.
+	return implicitProfileName("target", currentSessionId());
 }
 
 /**
@@ -246,12 +247,16 @@ function activeLayoutName(): string | null {
 	return store().layouts.activeName();
 }
 
-/** Name the active session: explicit active name, else the program basename (D3), else "session". */
+/**
+ * Name the active session: an explicit active name, else a per-session UUID
+ * (`session_<uuid>`). UUID naming keeps every unnamed session's auto-saved
+ * file unique — two sessions of the same program never clobber each other —
+ * and the result is directly resume-able (`aidb -r session_<uuid>`).
+ */
 function activeSessionName(): string {
 	const named = store().sessions.activeName();
 	if (named) return named;
-	const t = getLastLaunch();
-	return t ? (t.program.split("/").pop() || "session") : "session";
+	return implicitProfileName("session", currentSessionId());
 }
 
 /** Collect watch entries from every live watch pane (shared by `/layout save` snapshots). */
@@ -505,19 +510,22 @@ const sessionsHooks: SessionHooks = {
 	},
 	restore: restoreSession,
 	startNew: async (name?: string) => {
-		const chosen = name?.trim() || "session";
+		const chosen = name?.trim();
 		// A truly fresh slate: new gdb (no breakpoints), dropped target,
 		// single-pane layout, a fresh session and a fresh stable id.
 		await resetDebugger();
 		setLastLaunch(null);
 		windows.restoreTree(SplitTree.deserialize({ root: "repl", active: "repl" }));
-		store().sessions.setActive(chosen);
+		// Named sessions claim their name; unnamed ones stay unclaimed and
+		// auto-save under their fresh uuid (`session_<uuid>`).
+		if (chosen) store().sessions.setActive(chosen);
+		else store().sessions.clearActive();
 		store().targets.clearActive();
 		store().layouts.clearActive();
 		resetSessionId();
 		await flushSession();
 		updateStatus();
-		replCtx.io.success(`New session '${chosen}' — fresh target. Break a line, then run.`);
+		replCtx.io.success(`New session '${activeSessionName()}' — fresh target. Break a line, then run.`);
 		printIntro();
 	},
 	targets: {
@@ -657,6 +665,21 @@ function printIntro(): void {
 
 let exiting = false;
 
+/**
+ * Clear the TUI transcript and leave a single copyable resume hint on the
+ * terminal: `aidb -r <name>` resurrects exactly this debugging setup. Runs
+ * after the TUI is stopped, so it writes straight to the raw terminal.
+ */
+function printExitResumeHint(): void {
+	// Auto-save off means nothing was persisted — no hint to give.
+	if (!sessionsEnabled()) return;
+	// The name just flushed (explicit name, else `session_<uuid>`).
+	const name = activeSessionName();
+	transcript.clear();
+	process.stdout.write("\x1b[2J\x1b[H");
+	process.stdout.write(`Resume session with: aidb -r ${name}\n`);
+}
+
 async function shutdown(): Promise<void> {
 	if (exiting) return;
 	exiting = true;
@@ -670,6 +693,8 @@ async function shutdown(): Promise<void> {
 	} finally {
 		await dbg.cleanup().catch(() => undefined);
 		tui.stop();
+		// Clear the output and print the resume hint as the final screen.
+		printExitResumeHint();
 		if (traceDap) {
 			const trace = dbg.dumpDapTrace();
 			if (trace) process.stderr.write(`\n--- DAP trace ---\n${trace}\n`);
@@ -909,18 +934,23 @@ updateStatus();
 
 tui.start();
 
-// Startup sessions (pi-flag style): `--session <name>` opens that session,
-// `--resume` restores the most recently saved one. Runs after the screen is
-// up so the restore's transcript lines land on the visible pipe.
+// Startup sessions (pi-flag style): `--session <name>` / `-r <name>` opens
+// that session, `--resume` restores the most recently saved one. Runs after
+// the screen is up so the restore's transcript lines land on the visible pipe.
 async function resolveStartupSession(): Promise<void> {
 	const args = process.argv.slice(2);
 	const sessionIndex = args.indexOf("--session");
+	const shortIndex = args.indexOf("-r");
 	const resume = args.includes("--resume");
-	if (sessionIndex !== -1 && args[sessionIndex + 1]) {
-		const name = args[sessionIndex + 1]!;
+	// `-r <name>` is the short alias for `--session <name>` — the form the
+	// quit screen prints, so the hint is copy-paste runnable.
+	const name =
+		(sessionIndex !== -1 && args[sessionIndex + 1] ? args[sessionIndex + 1]! : undefined) ??
+		(shortIndex !== -1 && args[shortIndex + 1] ? args[shortIndex + 1]! : undefined);
+	if (name) {
 		const meta = store().sessions.list().find((s) => s.name === name);
 		if (meta) await restoreSession(name);
-		else replCtx.io.error(`--session: no saved session '${name}'. /open shows them.`);
+		else replCtx.io.error(`no saved session '${name}'. /open shows them.`);
 	} else if (resume) {
 		const list = store().sessions.list();
 		if (list.length === 0) {
