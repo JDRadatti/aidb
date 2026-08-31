@@ -75,6 +75,14 @@ export interface PickerOptions {
 	title: string;
 	items: PickerItem[];
 	/**
+	 * Fired whenever the highlighted row changes — on open, on ↑/↓, and on
+	 * filter edits — with the selected item, or null when nothing real is
+	 * highlighted (a `+ create` row or zero fuzzy matches). Lets a caller
+	 * preview selection live (e.g. `/theme` repaints the TUI with the
+	 * highlighted preset) without committing; the caller restores on cancel.
+	 */
+	onHighlight?(item: PickerItem | null): void;
+	/**
 	 * Seed the finder's filter with this text — how a pasted/recalled
 	 * `> <query>` line (routed through handleReplInput) opens pre-narrowed.
 	 */
@@ -358,6 +366,19 @@ export function openPicker(options: PickerOptions): void {
 	let list = built.list;
 	let createLabelText = built.createLabelText;
 
+	/** Report the currently-highlighted item (or null for the create row /
+	 * no matches) to `onHighlight` — called whenever the selection moves. */
+	const notifyHighlight = (): void => {
+		if (!options.onHighlight) return;
+		const selected = list.getSelectedItem();
+		const item =
+			selected && selected.value !== CREATE_VALUE
+				? options.items.find((i) => i.value === selected.value) ?? null
+				: null;
+		options.onHighlight(item);
+	};
+	notifyHighlight();
+
 	// The shared overlay re-reads this on every composite pass, so it always
 	// reflects the latest list/confirm state and the real band width.
 	renderCurrent = (width: number): readonly string[] | null =>
@@ -429,6 +450,7 @@ export function openPicker(options: PickerOptions): void {
 			list = built.list;
 			createLabelText = built.createLabelText;
 			syncPrompt(filter, caret);
+			notifyHighlight();
 			host?.requestRender();
 		};
 
@@ -577,6 +599,7 @@ export function openPicker(options: PickerOptions): void {
 			kb.matches(data, "tui.select.pageDown")
 		) {
 			list.handleInput(data);
+			notifyHighlight();
 			host?.requestRender();
 			return { consume: true };
 		}

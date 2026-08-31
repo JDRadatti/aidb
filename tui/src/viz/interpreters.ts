@@ -181,7 +181,7 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
 			const sourceLine = instruction.line === undefined ? "     " : String(instruction.line).padStart(5);
 			const row = formatInstruction(
-				`${marker} ${breakpointMarker} ${sourceLine} `,
+				`${marker} ${breakpointMarker} ${sourceLine} ${colors.muted("│")} `,
 				instruction.address,
 				currentSymbol,
 				instruction.instruction,
@@ -199,7 +199,7 @@ export function renderCode(snap: BindingSnapshot, _prev: BindingSnapshot | undef
 		const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === number);
 		const executionMarker = current ? "▶" : " ";
 		const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
-		const numberAndCode = `${String(number).padStart(5)} │ `;
+		const numberAndCode = `${String(number).padStart(5)} ${colors.muted("│")} `;
 		if (current) return currentLineWrap(`${executionMarker} ${breakpointMarker} ${numberAndCode}${highlightCode(line)}`);
 		const gutter = breakpoint ? `${executionMarker} ${colors.error(breakpointMarker)} ${numberAndCode}` : `${executionMarker} ${breakpointMarker} ${numberAndCode}`;
 		return gutter + highlightCode(line);
@@ -228,7 +228,7 @@ export function renderInterleaved(snap: BindingSnapshot): string[] {
 			const breakpoint = snap.breakpoints?.find((candidate) => candidate.line === entry.line);
 			const marker = entry.current ? "▶" : " ";
 			const breakpointMarker = breakpoint ? (breakpoint.verified ? "●" : "○") : " ";
-			const prefix = `${marker} ${breakpointMarker} ${String(entry.line).padStart(5)} │ `;
+			const prefix = `${marker} ${breakpointMarker} ${String(entry.line).padStart(5)} ${colors.muted("│")} `;
 			return entry.current ? currentLineWrap(prefix + highlightCode(entry.text)) : prefix + highlightCode(entry.text);
 		}
 		const instruction = entry.instruction;
@@ -239,7 +239,7 @@ export function renderInterleaved(snap: BindingSnapshot): string[] {
 		// (one space after the rail), so a mapped instruction recedes under its
 		// source line without extra indentation.
 		const marker = instruction.current ? "▶" : " ";
-		const row = formatInstruction(`${marker}         │ `, instruction.address, instruction.symbol, instruction.instruction);
+		const row = formatInstruction(`${marker}         ${colors.muted("│")} `, instruction.address, instruction.symbol, instruction.instruction);
 		return instruction.current ? currentLineWrap(row) : row;
 	});
 	return snap.info ? [colors.muted(`i ${snap.info}`), ...lines] : lines;

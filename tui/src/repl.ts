@@ -9,7 +9,7 @@ import { LivePaneView } from "./views/live-pane.ts";
 import { WatchListView } from "./views/watch.ts";
 import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
-import { colors, dimPlaceholders, paletteSwatch } from "./theme.ts";
+import { colors, dimPlaceholders } from "./theme.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
 import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
@@ -21,6 +21,7 @@ import {
 	THEME_PRESETS,
 	THEME_PRESET_NAMES,
 	actionKeyLabel,
+	type ThemeConfig,
 	type Action,
 	type Config,
 	type ConfigSources,
@@ -91,6 +92,10 @@ export interface ReplContext {
 	reset(): Promise<DebuggerAPI>;
 	requestExit(): void;
 	requestRender(): void;
+	/** Modal yes/no gate for destructive actions (e.g. a re-`run` that restarts
+	 * the program). When absent, callers run the action directly (tests/hosts
+	 * without the gate). Enter confirms, Esc/ctrl+c cancels. */
+	confirm?(question: string, action: () => void | Promise<void>): void;
 	io: ReplIO;
 	windows: WindowManager;
 	spinner?: ActivitySpinner;
@@ -98,6 +103,13 @@ export interface ReplContext {
 	config: Config;
 	configSources: ConfigSources;
 	reloadConfig(): { config: Config; sources: ConfigSources };
+	/**
+	 * Live-apply a theme to colours AND editor frame without touching config
+	 * files or keybindings — used to preview presets while navigating `/theme`.
+	 * `reloadConfig` re-reads files and re-applies everything, so a commit can
+	 * go through it as today.
+	 */
+	previewTheme?(theme: ThemeConfig): void;
 	sessions?: SessionHooks;
 }
 
@@ -144,7 +156,8 @@ const HELP = [
 	"                                    ctrl+d delete · ctrl+r rename.",
 	"  /session <name> /target <name> /layout <name>   act on that one directly.",
 	"  /open (Alt-O) · `>`               one combined finder over sessions · layouts · targets.",
-	"  /theme (bare)                     fuzzy finder over theme presets (live colour swatches);",
+	"  /theme (bare)                     picker over theme presets, live-previewing the highlighted",
+	"                                    theme as you arrow through (Esc restores yours);",
 	"  /theme <name>                     apply + save that preset (~/.aidbrc), keeping your overrides.",
 	"  /settings                         effective config (theme, gdb, keys, sessions).",
 	"  /config reload                    re-read ~/.aidbrc + ./.aidb.json.",
@@ -152,6 +165,7 @@ const HELP = [
 	"  targets/layouts are shared profiles; everything saved lives on disk.",
 	"  slash commands: /help · /open · /settings · /session · /target · /layout · /theme · /win · /config · /watch · /new · /quit",
 	"History: Ctrl+P / Ctrl+N, or Up/Down on an empty prompt. Enter on an empty prompt repeats the last command — keep pressing Enter to step. Commands that make no sense to repeat (run, quit, /new, switching sessions/layouts/targets, /win or /watch mutations) are not repeated. Topic help: help <topic> (e.g. help win).",
+	"Clear: <clearScreen> wipes the transcript (cmd's cls / bash's clear); typed input and saved state are untouched.",
 	"Scroll: Ctrl+Up/Ctrl+Down (or PgUp/PgDn) scroll the active pane; Home/End",
 ].join("\n");
 
@@ -585,14 +599,34 @@ async function handleFile(args: string, ctx: ReplContext): Promise<void> {
 async function handleRun(args: string, ctx: ReplContext): Promise<void> {
 	const words = args.split(/\s+/).filter(Boolean);
 	if (words.length > 0) {
-		await startTarget(words[0], words.slice(1), ctx);
+		launchTarget(words[0], words.slice(1), ctx);
 		return;
 	}
 	if (!lastLaunch) {
 		ctx.io.error("No program loaded yet. Usage: run <program> [args...]");
 		return;
 	}
-	await startTarget(lastLaunch.program, lastLaunch.args, ctx);
+	launchTarget(lastLaunch.program, lastLaunch.args, ctx);
+}
+
+/**
+ * Launch a program, asking first when it would RESTART an already-started
+ * one (gdb-style `run` discards the current inferior state — the case worth
+ * double-checking). First runs launch straight away; the gate is armed via
+ * `ctx.confirm` and the actual launch happens on Enter.
+ */
+function launchTarget(program: string, args: string[], ctx: ReplContext): void {
+	const run = (): void => {
+		void startTarget(program, args, ctx);
+	};
+	// `file <program>` and bare `run` share this path; lastLaunch being set is
+	// the reliable "a program is already loaded/ran" signal for both.
+	if (lastLaunch && ctx.confirm) {
+		const display = /^[^\s"']+$/.test(program) ? program : JSON.stringify(program);
+		ctx.confirm(`run ${display}${args.length ? ` ${args.join(" ")}` : ""}? restarting discards the current run`, run);
+		return;
+	}
+	run();
 }
 
 /**
@@ -1496,21 +1530,44 @@ function applyThemePreset(rawName: string, ctx: ReplContext): void {
 	for (const issue of sources.issues) io.warning(`config ${issue.path}: ${issue.message}`);
 }
 
-/** `› /theme <name>` echo; used by bare `/theme`. Rows preview the preset's
- * OWN palette (`paletteSwatch`) and mark the one currently selected in the rc
- * file with ✳ — so switching themes is a one-Esc-away, colour-accurate pick. */
+/**
+ * `› /theme` picker; used by bare `/theme`. Rows mark the one currently
+ * selected in the rc file with ✳. Navigating ↑/↓ (or typing a filter)
+ * live-previews each highlighted preset across the whole TUI via
+ * `ctx.previewTheme` — no files touched — and Esc restores the theme that
+ * was active when the picker opened. Enter commits through
+ * `applyThemePreset` (persist + reload).
+ */
 function openThemePicker(ctx: ReplContext): void {
 	const rcFile = ctx.configSources.rc ?? path.join(os.homedir(), ".aidbrc");
 	const current = currentThemePreset(rcFile);
+	// Snapshot what is applied when the picker opens, so Esc cancels the
+	// live preview back to the real current theme (config.theme is never
+	// mutated by previews — only the live colour roles and editor frame).
+	const previous = ctx.config.theme;
+	const preview = (theme: ThemeConfig): void => {
+		ctx.previewTheme?.(theme);
+		ctx.requestRender();
+	};
 	const items: PickerItem[] = THEME_PRESET_NAMES.map((name) => ({
 		value: name,
 		search: name,
-		label: `${paletteSwatch(THEME_PRESETS[name]!)}  ${name}${name === current ? " ✳" : ""}`,
+		label: `${name}${name === current ? " ✳" : ""}`,
 		description: `${THEME_PRESET_MODE[name] ?? ""} palette`.trim(),
 	}));
 	openPicker({
 		title: "theme presets",
 		items,
+		onHighlight: (item) => {
+			if (!item) {
+				// No real row highlighted (filter narrowed to nothing) — show the
+				// theme that's actually in effect.
+				preview(previous);
+				return;
+			}
+			const preset = THEME_PRESETS[item.value];
+			if (preset) preview(preset);
+		},
 		onPick: (item) => {
 			if (!item.value) return;
 			const echo = `/theme ${item.value}`;
@@ -1518,7 +1575,10 @@ function openThemePicker(ctx: ReplContext): void {
 			setLastReplay(echo);
 			applyThemePreset(item.value, ctx);
 		},
-		onCancel: () => clearLastReplay(),
+		onCancel: () => {
+			preview(previous);
+			clearLastReplay();
+		},
 	});
 }
 

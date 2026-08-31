@@ -1,8 +1,5 @@
 # TODO
-- new sessions should start new history and just say [session 'sessionname' activated] at the top. 
 - improve ux/readability/colors and spacing between things. related things should be grouped together and not related things should be separated by a line. 
-- need a ux for things we want to make sure about, like run command 
-- ctrl+l to refresh history (like in command prompto)
 - sessions should maybe be forced saved as well?
 - open new files.
 - embed nvim?
@@ -12,8 +9,8 @@
 - mmaybe in the future this would be good: 1. prompt the llm to make a fix. they will do so then they set up a debug session that you can step through.
 - for example, it could walk you through a bug (show you the data 
 - each change could also do data diffs or just correlate the data with what was just changed (maybe the data that touches the diff should be also diffed)
-- the vertical lines to the left of the source code is separated, but combined in asm. it should be combined in both and muted.
 - prompt hints for state assertions and expectations when stepping.
+- locals watch mode
 
 
 # NEXT — do these first
@@ -47,6 +44,23 @@
   we can try on different OSs with different versions with differenet screen sizes.
 - we can also task the AI to create a certain visualization and check output.
 - the watch windows are nice, but ideally would like to create better output visuzlations.
+
+# DONE — small UX batch (fresh sessions, Ctrl+L, run-confirm, gutter rail)
+- `/new` is now a real fresh slate: the recall history (Ctrl+P/N) is cleared
+  and the transcript is reset — the only line on screen is a compact
+  `[session 'x' activated]` notice instead of the full banner re-print
+  (AidbEditor.clearHistory + transcript.clear in `startNew`). Startup banner
+  unchanged.
+- Ctrl+L clears the transcript like bash's `clear` / cmd's `cls` (new
+  `clearScreen` action, default chord `ctrl+l`, remappable, listed in
+  /settings + help). Typed prompt and saved state survive.
+- a confirm gate for destructive actions (the picker's Enter/Esc pattern,
+  but printed in the transcript): `run` now asks when it would RESTART the
+  already-started program (`restarting discards the current run`); first
+  runs launch straight away. Reusable via `ctx.confirm(question, action)`.
+- source/asm gutter: the vertical rail is now ONE combined `muted` column in
+  the plain source view, the plain asm view (it had no pipe at all) and the
+  interleaved view — line numbers/addresses stop at the same muted `│`.
 
 # DONE — principled highlighting (option A: regex, lexer reverted)
 - source/asm highlighting is per-line regex + keyword set (same shape gdb uses
@@ -147,3 +161,10 @@
 - unnamed sessions/targets auto-save as noun-prefixed uuids (`session_<uuid>` / `target_<uuid>`, replacing `@<uuid>` / program-basename / "session") so they never collide and are always resume-able
 - going to prev with ctrl+p (or ArrowUp) should put cursor at the end
 - auto complete on tab should only fire when relevant (run/file paths, path-shaped tokens)
+
+# performance
+- memory footprint of longrunning programs
+- how fast can we step through a long program
+- how fast can we ctrl+up through a long long file
+- startup time
+- time to paint

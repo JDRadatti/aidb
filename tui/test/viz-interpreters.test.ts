@@ -165,11 +165,12 @@ describe("byte renderers", () => {
 describe("renderCode", () => {
 	it("renders source lines with a current-line marker", () => {
 		const lines = renderCode({ kind: "source", file: "example.c", startLine: 9, currentLine: 10, lines: ["int main()", "return 0;"] }, undefined, WIDE);
-		assert.match(lines[0]!, /^        9 │ \x1b\[36mint\x1b\[0m main\(\)$/);
+		assert.match(lines[0]!, /^        9 \x1b\[90m│\x1b\[0m \x1b\[36mint\x1b\[0m main\(\)$/);
 		// The current row is wrapped like the fuzzy picker's selected row:
 		// bold + accent over the WHOLE line, re-opened after each token reset
-		// so token colours survive inside the highlight.
-		assert.match(lines[1]!, /^\x1b\[1m\x1b\[36m▶      10 │ \x1b\[36mreturn\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[33m0\x1b\[0m\x1b\[1m\x1b\[36m;\x1b\[0m$/);
+		// so token colours survive inside the highlight; the muted rail is
+		// re-opened too, staying dim inside the wrap.
+		assert.match(lines[1]!, /^\x1b\[1m\x1b\[36m▶      10 \x1b\[90m│\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[36mreturn\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[33m0\x1b\[0m\x1b\[1m\x1b\[36m;\x1b\[0m$/);
 	});
 
 	it("renders aligned verified and pending breakpoint markers", () => {
@@ -181,9 +182,9 @@ describe("renderCode", () => {
 		}, undefined, WIDE);
 
 		assert.match(lines[0]!, /\x1b\[31m●\x1b\[0m/);
-		assert.match(lines[0]!, /●\x1b\[0m     9 │ \x1b\[36mint\x1b\[0m main\(\)/);
+		assert.match(lines[0]!, /●\x1b\[0m     9 \x1b\[90m│\x1b\[0m \x1b\[36mint\x1b\[0m main\(\)/);
 		assert.match(lines[2]!, /\x1b\[31m○\x1b\[0m/);
-		assert.match(lines[2]!, /○\x1b\[0m    11 │ done\(\)/);
+		assert.match(lines[2]!, /○\x1b\[0m    11 \x1b\[90m│\x1b\[0m done\(\)/);
 	});
 
 	it("highlights conservative C/C++ syntax without changing source text", () => {
@@ -222,7 +223,7 @@ describe("renderCode", () => {
 				startLine: 1,
 				lines: ["int main() { return sizeof(int); }"],
 			}, undefined, WIDE);
-			assert.match(line!, /│ \x1b\[22mint\x1b\[0m main\(\) \{ \x1b\[31mreturn\x1b\[0m \x1b\[31msizeof\x1b\[0m\(\x1b\[22mint\x1b\[0m\); \}/);
+			assert.match(line!, /\x1b\[90m│\x1b\[0m \x1b\[22mint\x1b\[0m main\(\) \{ \x1b\[31mreturn\x1b\[0m \x1b\[31msizeof\x1b\[0m\(\x1b\[22mint\x1b\[0m\); \}/);
 
 			// `struct`/`union` are statement keywords, not type names: keyword role.
 			const [structLine] = renderCode({
@@ -230,7 +231,7 @@ describe("renderCode", () => {
 				startLine: 1,
 				lines: ["struct Point { int x; };"],
 			}, undefined, WIDE);
-			assert.match(structLine!, /│ \x1b\[31mstruct\x1b\[0m Point \{ \x1b\[22mint\x1b\[0m x; \}/);
+			assert.match(structLine!, /\x1b\[90m│\x1b\[0m \x1b\[31mstruct\x1b\[0m Point \{ \x1b\[22mint\x1b\[0m x; \}/);
 		} finally {
 			applyTheme(DEFAULT_CONFIG.theme);
 		}
@@ -270,7 +271,7 @@ describe("renderCode", () => {
 			currentAddress: "0x401126 <main+0>",
 			instructions: [{ address: "0X401126", symbol: "main", instructionBytes: "55", instruction: "push %rbp", line: 12, current: false }],
 		}, undefined, WIDE);
-		assert.match(stripAnsi(lines[0]!), /^▶      12 0[Xx]401126\s+<main>\s+push %rbp/);
+		assert.match(stripAnsi(lines[0]!), /^▶      12 │ 0[Xx]401126\s+<main>\s+push %rbp/);
 	});
 
 	it("keeps the assembly source-line column aligned when debug info is missing", () => {
@@ -283,8 +284,8 @@ describe("renderCode", () => {
 			breakpoints: [{ line: 12, verified: true }],
 		}, undefined, WIDE);
 
-		assert.match(stripAnsi(lines[0]!), /^▶ ●    12 0x401126/);
-		assert.match(stripAnsi(lines[1]!), /^          0x401127/);
+		assert.match(stripAnsi(lines[0]!), /^▶ ●    12 │ 0x401126/);
+		assert.match(stripAnsi(lines[1]!), /^ {10}│ 0x401127/);
 	});
 
 	it("renders the function symbol across instructions in the same function", () => {

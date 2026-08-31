@@ -125,6 +125,7 @@ export const ACTIONS = [
 	"scrollUp",
 	"scrollDown",
 	"open",
+	"clearScreen",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -158,6 +159,8 @@ export const DEFAULT_ACTIONS: Record<Action, KeyId[]> = {
 	scrollUp: ["ctrl+up", "pageUp"],
 	scrollDown: ["ctrl+down", "pageDown"],
 	open: ["alt+o"],
+	// cmd/bash-style: clear the terminal transcript (typed input is preserved).
+	clearScreen: ["ctrl+l"],
 };
 
 export const DEFAULT_EDITOR_BINDINGS: Record<string, KeyId[]> = {

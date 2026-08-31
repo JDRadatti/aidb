@@ -30,6 +30,7 @@ const ACTION_LABELS: Record<Action, string> = {
 	scrollUp: "scroll up",
 	scrollDown: "scroll down",
 	open: "/open finder",
+	clearScreen: "clear screen",
 };
 
 function themeLine(role: string, code: number): string {

@@ -92,6 +92,14 @@ export class AidbEditor extends Editor {
 		);
 	}
 
+	/** Drop the recall history entirely — `/new` starts a fresh session with no past. */
+	clearHistory(): void {
+		const rec = this as unknown as Record<string, unknown>;
+		// Mutate in place: Editor.history is a plain array field, but a reassign
+		// would break if a future pi-tui exposes it through a getter.
+		if (Array.isArray(rec.history)) rec.history.length = 0;
+	}
+
 	/**
 	 * Make Enter submit a slash command in one press even when an argument
 	 * autocomplete dropdown is open.

@@ -16,7 +16,7 @@ function config(over: Partial<Config> = {}): Config {
 		keybindings: {
 			actions: {
 				continue: ["f5"], stepOver: ["f10"], stepInto: ["f11"], stepOut: ["shift+f11"],
-				scrollUp: ["ctrl+up", "pageUp"], scrollDown: ["ctrl+down", "pageDown"], open: ["alt+o"],
+				scrollUp: ["ctrl+up", "pageUp"], scrollDown: ["ctrl+down", "pageDown"], open: ["alt+o"], clearScreen: ["ctrl+l"],
 			},
 			editor: {},
 		},
@@ -50,6 +50,7 @@ describe("renderSettings", () => {
 		assert.ok(lines.some((line) => line.includes("path gdb") && line.includes("args")));
 		assert.ok(lines.some((line) => line.includes("continue") && line.includes("F5")));
 		assert.ok(lines.some((line) => line.includes("open finder") && line.includes("Alt+O")));
+		assert.ok(lines.some((line) => line.includes("clear screen") && line.includes("Ctrl+L")));
 		assert.ok(lines.some((line) => line.includes("~/.config/aidb/sessions")));
 		assert.ok(lines.some((line) => line.includes("autoSave") && line.includes("on")));
 		assert.ok(lines.some((line) => line.includes("breakStyle")));

@@ -15,7 +15,7 @@ import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import * as fs from "node:fs";
 import { AidbEditor, attachDropdownOverlay } from "./completion-overlay.ts";
 import { colors, applyTheme, createEditorTheme } from "./theme.ts";
-import { loadConfig, resolveAction, type Action, type Config, type ConfigSources } from "./config.ts";
+import { loadConfig, resolveAction, type Action, type Config, type ConfigSources, type ThemeConfig } from "./config.ts";
 import {
 	handleReplInput,
 	refreshLivePanes,
@@ -519,8 +519,12 @@ const sessionsHooks: SessionHooks = {
 		resetSessionId();
 		await flushSession();
 		updateStatus();
-		replCtx.io.success(`New session '${activeSessionName()}' — fresh target. Break a line, then run.`);
-		printIntro();
+		// A truly fresh session is a fresh slate: the recall history (Ctrl+P/N)
+		// starts empty and the transcript is cleared — the only line on screen
+		// is the compact `[session '…' activated]` notice (no banner re-print).
+		editor.clearHistory();
+		transcript.clear();
+		addLine(colors.accent(`[session '${activeSessionName()}' activated]`));
 	},
 	targets: {
 		current: () => activeTargetName(),
@@ -681,6 +685,22 @@ function printIntro(): void {
 let exiting = false;
 
 /**
+ * Pending "are you sure?" gate — while set, every key is consumed: Enter runs
+ * the action, Esc/ctrl+c cancels. Used for destructive/irreversible steps like
+ * a `run` that restarts the already-started program. Mirrors the picker's
+ * inline delete-confirm affordance (band row + Enter/Esc).
+ */
+let pendingConfirm: { question: string; onConfirm: () => void | Promise<void> } | null = null;
+
+/** Print a confirm question into the transcript and arm the input gate. */
+function askConfirm(question: string, action: () => void | Promise<void>): void {
+	pendingConfirm = { question, onConfirm: action };
+	addLine(colors.warning(`⚠ ${question}`));
+	addLine(colors.muted("  Enter to confirm · Esc to cancel"));
+	tui.requestRender();
+}
+
+/**
  * Clear the TUI transcript and leave a single copyable resume hint on the
  * terminal: `aidb -r <name>` resurrects exactly this debugging setup. Runs
  * after the TUI is stopped, so it writes straight to the raw terminal.
@@ -751,6 +771,7 @@ const replCtx: ReplContext = {
 	io,
 	windows,
 	spinner,
+	confirm: askConfirm,
 	// Getters (not snapshot values) so `reloadConfig` reassigning the module
 	// `config`/`configSources` is visible to every consumer on the next read —
 	// the settings view renders the fresh values after `/config reload`.
@@ -761,6 +782,18 @@ const replCtx: ReplContext = {
 		return configSources;
 	},
 	reloadConfig,
+	// Live preview for `/theme`: re-theme colours + editor frame exactly like
+	// `reloadConfig` does, but WITHOUT re-reading files or re-binding keys —
+	// Esc in the picker hands the old theme back through the same path.
+	previewTheme: (theme) => {
+		applyTheme(theme);
+		if (editor) {
+			const editorTheme = createEditorTheme(theme);
+			const rec = editor as unknown as { theme?: unknown };
+			if (rec.theme) rec.theme = editorTheme;
+			editor.borderColor = editorTheme.borderColor;
+		}
+	},
 	sessions: sessionsHooks,
 };
 
@@ -895,6 +928,13 @@ const actionHandlers: Record<Action, (data: string) => void> = {
 		clearLastReplay();
 		void handleOpen(replCtx);
 	},
+	// cmd/bash-style clear: wipe the transcript (the typed prompt survives —
+	// like `cls`/`clear`, history and sessions are untouched).
+	clearScreen: () => {
+		clearLastReplay();
+		transcript.clear();
+		tui.requestRender();
+	},
 };
 
 function guard(run: (api: DebuggerAPI) => Promise<unknown>): void {
@@ -923,6 +963,21 @@ function actionFor(data: string): Action | null {
 }
 
 tui.addInputListener((data): { consume: boolean } | undefined => {
+	// A pending confirm owns every key: Enter confirms, Esc/ctrl+c cancels.
+	// Consumed before the picker/editor/actions so nothing else acts mid-gate.
+	if (pendingConfirm) {
+		const cb = pendingConfirm.onConfirm;
+		if (matchesKey(data, "enter")) {
+			pendingConfirm = null;
+			void cb();
+		} else if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			pendingConfirm = null;
+			addLine(colors.muted("Cancelled."));
+		}
+		tui.requestRender();
+		return { consume: true };
+	}
+
 	// While the fuzzy picker is open, every key belongs to it (its own
 	// listener consumes them; we must not act on them here — including
 	// Ctrl+C, which the picker treats as cancel).

@@ -6,6 +6,7 @@ import { DEFAULT_ACTIONS, resolveAction } from "../src/config.ts";
 const KEY = {
 	ctrlP: "\x10",
 	ctrlN: "\x0e",
+	ctrlL: "\x0c",
 	ctrlUp: "\x1b[1;5A",
 	ctrlDown: "\x1b[1;5B",
 };
@@ -14,6 +15,8 @@ describe("action dispatch", () => {
 	it("default bindings fire the expected actions", () => {
 		assert.equal(resolveAction(DEFAULT_ACTIONS, KEY.ctrlUp), "scrollUp");
 		assert.equal(resolveAction(DEFAULT_ACTIONS, KEY.ctrlDown), "scrollDown");
+		// cmd/bash-style clear-screen (the terminal sends raw 0x0C for ctrl+l).
+		assert.equal(resolveAction(DEFAULT_ACTIONS, KEY.ctrlL), "clearScreen");
 		// a plain F-key sequence is not representable here, but a remapped
 		// control chord is:
 		assert.equal(resolveAction({ ...DEFAULT_ACTIONS, continue: ["ctrl+p"] }, KEY.ctrlP), "continue");

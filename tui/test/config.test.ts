@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, type TuiInputListener } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_CONFIG,
 	canonicalThemeName,
@@ -313,6 +314,50 @@ describe("theme presets", () => {
 			const { handleReplInput } = await import("../src/repl.ts");
 			await handleReplInput("/theme", makeThemeCtx(path.join(tmpDir(), ".aidbrc"), messages));
 			assert.deepEqual(messages, []);
+		});
+
+		it("bare /theme live-previews the highlighted preset; Esc restores; rows have no swatch", async () => {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, {}));
+			let listener: TuiInputListener | null = null;
+			const { installPickerHost, pickerLineSource } = await import("../src/picker.ts");
+			installPickerHost({
+				addInputListener: (fn) => {
+					listener = fn;
+					return () => {
+						listener = null;
+					};
+				},
+				requestRender: () => {},
+				setPromptText: () => {},
+				setPromptCaret: () => {},
+			});
+			const previews: ThemeConfig[] = [];
+			const messages: string[] = [];
+			const { handleReplInput } = await import("../src/repl.ts");
+			const ctx = Object.assign(makeThemeCtx(path.join(tmpDir(), ".aidbrc"), messages), {
+				previewTheme: (theme: ThemeConfig) => previews.push(theme),
+			}) as never;
+			await handleReplInput("/theme", ctx);
+			assert.ok(listener, "theme picker opened with an input listener");
+
+			const names = Object.keys(THEME_PRESETS);
+			const rows = (pickerLineSource(60) ?? []).filter((l) => l.trim().length > 0);
+			assert.ok(rows[0]!.includes(names[0]!), "first row is the first preset");
+			assert.ok(!rows[0]!.includes("▊"), "theme rows carry no colour swatch on the left");
+
+			// Opening highlights row 0, so the first preset previews immediately.
+			assert.equal(previews.length, 1);
+			assert.deepEqual(previews[0], THEME_PRESETS[names[0]!]);
+			// ↓/↓ move the highlight; each move previews that row's preset (no persist).
+			listener?.("\x1b[B");
+			assert.deepEqual(previews[1], THEME_PRESETS[names[1]!]);
+			listener?.("\x1b[B");
+			assert.deepEqual(previews[2], THEME_PRESETS[names[2]!]);
+			// Esc restores the theme that was in effect when the picker opened.
+			listener?.("\x1b");
+			assert.deepEqual(previews[previews.length - 1], DEFAULT_CONFIG.theme);
+			assert.equal(listener, null, "picker closed");
+			installPickerHost(null);
 		});
 	});
 

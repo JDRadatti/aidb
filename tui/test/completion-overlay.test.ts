@@ -267,6 +267,18 @@ describe("AidbEditor history recall", () => {
 			setKeybindings(PREV);
 		}
 	});
+
+	it("/new's clearHistory drops the recall list (fresh session, no past)", () => {
+		const { aidb } = recallEditor();
+		try {
+			aidb.clearHistory();
+			aidb.handleInput("\x10"); // ctrl+p — nothing left to recall
+			assert.equal(aidb.getText(), "");
+			assert.deepEqual(aidb.getCursor(), { line: 0, col: 0 });
+		} finally {
+			setKeybindings(PREV);
+		}
+	});
 });
 
 describe("AidbEditor dropdown dismissal", () => {
