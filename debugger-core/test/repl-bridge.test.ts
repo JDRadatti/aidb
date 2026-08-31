@@ -518,6 +518,68 @@ describe("frame selection", () => {
 	});
 });
 
+describe("resume commands and frame staleness", () => {
+	it("never pins a frame on a resume command like si", async () => {
+		const { api, bus, fake } = setup();
+		fake.onRequest("evaluate", () => ({ result: "" }));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.evaluate("si", "repl");
+
+		const evalReq = fake.requests.find((r) => r.command === "evaluate" && r.args?.expression === "si");
+		expect(evalReq?.args.frameId).toBeUndefined();
+		// No resolveEvalFrameId stack fetch either — resume commands don't need one.
+		expect(fake.count("stackTrace")).toBe(1);
+	});
+
+	it("evaluateDetailed accepts arg-form resume commands without a frame", async () => {
+		const { api, bus, fake } = setup();
+		fake.onRequest("evaluate", () => ({ result: "", variablesReference: 0 }));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		await api.evaluateDetailed("si 5", "repl");
+
+		const evalReq = fake.requests.find((r) => r.command === "evaluate" && r.args?.expression === "si 5");
+		expect(evalReq?.args.frameId).toBeUndefined();
+	});
+
+	it("omits the frame while a resume is in flight, then pins again after it settles", async () => {
+		const { api, bus, fake } = setup();
+		fake.onRequest("stackTrace", () => ({
+			stackFrames: [
+				{ id: 7, name: "main", source: { path: "/tmp/main.c" }, line: 12, column: 1 },
+			],
+		}));
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		fake.onRequest("evaluate", () => gate.then(() => ({ result: "" })));
+		await api.launch("./app");
+		emitStop(bus, { reason: "breakpoint", threadId: 5 });
+		await flushAsync();
+
+		// `si` is dispatched but its response is still pending — the inferior may
+		// already be running, so gdb's frame ids are (or are about to be) dead.
+		const pendingResume = api.evaluate("si", "repl");
+		const pendingPrint = api.evaluate("print x");
+		await flushAsync();
+
+		const queuedPrint = fake.requests.find((r) => r.command === "evaluate" && r.args?.expression === "print x");
+		expect(queuedPrint?.args.frameId).toBeUndefined();
+
+		release();
+		await pendingResume;
+		await pendingPrint;
+
+		await api.evaluate("print y");
+		const settledEval = fake.requests.filter((r) => r.command === "evaluate").at(-1);
+		expect(settledEval?.args.frameId).toBe(7);
+	});
+});
+
 describe("per-stop caches", () => {
 	it("coalesces repeated getStack calls within one stop", async () => {
 		const { api, bus, fake } = setup();

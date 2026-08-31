@@ -22,6 +22,31 @@ import { CapabilityUnsupportedError, FrameNotFoundError, MemoryReadError } from 
 /**
  * GDB commands that should be routed to DAP evaluate.
  */
+/**
+ * GDB commands that resume the inferior. GDB's DAP destroys its frame-id map
+ * the moment the thread continues (`gdb.events.cont` -> `_clear_frame_ids`), so
+ * pinning a frameId on a resume command makes queued requests crash with an
+ * IndexError ("list index out of range") when GDB processes the stale id.
+ * Resume commands never need a frame pinned: they operate on the thread as a
+ * whole, and GDB already keeps the stop's frame selected.
+ */
+const RESUME_COMMANDS = new Set([
+	"si", "stepi", "ni", "nexti",
+	"step", "next", "s", "n",
+	"continue", "c",
+	"run", "r",
+	"finish",
+	"until", "u",
+	"advance",
+	"-exec-run", "-exec-step", "-exec-stepi", "-exec-next", "-exec-nexti",
+	"-exec-continue", "-exec-finish", "-exec-until",
+]);
+
+function isResumeExpression(expression: string): boolean {
+	const cmd = expression.trim().split(/\s+/)[0] ?? "";
+	return RESUME_COMMANDS.has(cmd);
+}
+
 const GDB_COMMANDS = [
 	"break",
 	"b ",
@@ -98,6 +123,12 @@ export function createDebuggerAPI(
 	const scopesCache = new Map<number, any>();
 	const variablesCache = new Map<number, Variable[]>();
 	const pendingBreakpointUpdates = new Map<number, { verified: boolean; file?: string; line?: number }>();
+	/**
+	 * True while a resume command routed through `evaluate` (e.g. `si`) is
+	 * outstanding. Any request queued behind it runs after GDB destroyed the
+	 * frame-id map, so no frameId may be pinned until it clears.
+	 */
+	let resumeInFlight = false;
 
 	function invalidateStopData(): void {
 		cachedStack = null;
@@ -186,7 +217,10 @@ export function createDebuggerAPI(
 
 	/** Frame id evaluations should pin to; undefined lets gdb use its default. */
 	async function resolveEvalFrameId(): Promise<number | undefined> {
-		if (stateMachine.getState() !== "stopped") return undefined;
+		// Frame ids are only valid while the inferior is stopped AND nothing
+		// queued ahead of us can resume it (a running inferior or an in-flight
+		// resume destroys them; gdb then IndexErrors on the stale id).
+		if (stateMachine.getState() !== "stopped" || resumeInFlight) return undefined;
 		const frames = await getStackCached();
 		if (frames.length === 0) return undefined;
 		return frames[selectedIndex(frames)].id;
@@ -562,20 +596,28 @@ export function createDebuggerAPI(
 
 		async evaluateDetailed(expression: string, context: string = "watch"): Promise<EvaluateInfo> {
 			await ensureStarted();
-			const frameId = await resolveEvalFrameId();
-			const result = await dapClient.sendRequest("evaluate", {
-				expression,
-				frameId,
-				context,
-			});
-			return {
-				result: String(result.result ?? ""),
-				type: result.type,
-				variablesReference: result.variablesReference ?? 0,
-				namedVariables: result.namedVariables,
-				indexedVariables: result.indexedVariables,
-				memoryReference: result.memoryReference,
-			};
+			const resume = isResumeExpression(expression);
+			if (resume) resumeInFlight = true;
+			try {
+				// Never pin a frame on resume commands: the id dies mid-flight as
+				// soon as the inferior continues, and stale ids crash gdb's DAP.
+				const frameId = resume ? undefined : await resolveEvalFrameId();
+				const result = await dapClient.sendRequest("evaluate", {
+					expression,
+					frameId,
+					context,
+				});
+				return {
+					result: String(result.result ?? ""),
+					type: result.type,
+					variablesReference: result.variablesReference ?? 0,
+					namedVariables: result.namedVariables,
+					indexedVariables: result.indexedVariables,
+					memoryReference: result.memoryReference,
+				};
+			} finally {
+				if (resume) resumeInFlight = false;
+			}
 		},
 
 		async getVariableChildren(reference: number, start?: number, count?: number): Promise<Variable[]> {
@@ -657,15 +699,21 @@ export function createDebuggerAPI(
 
 		async evaluate(expression: string, context: string = "watch") {
 			await ensureStarted();
-			// Only pin to a frame while the target is stopped. Asking for a stack
-			// while running/exited makes GDB's DAP blow up with internal Python errors.
-			const frameId = await resolveEvalFrameId();
-			const result = await dapClient.sendRequest("evaluate", {
-				expression,
-				frameId,
-				context,
-			});
-			return result.result;
+			const resume = isResumeExpression(expression);
+			if (resume) resumeInFlight = true;
+			try {
+				// Only pin to a frame while the target is stopped — and never on
+				// resume commands (see RESUME_COMMANDS; stale ids crash gdb DAP).
+				const frameId = resume ? undefined : await resolveEvalFrameId();
+				const result = await dapClient.sendRequest("evaluate", {
+					expression,
+					frameId,
+					context,
+				});
+				return result.result;
+			} finally {
+				if (resume) resumeInFlight = false;
+			}
 		},
 
 		on(event, handler) {
