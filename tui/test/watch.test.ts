@@ -56,14 +56,13 @@ describe("WatchListView", () => {
 		assert.equal(view.getEntries().length, 0);
 	});
 
-	it("d deletes the entry under the cursor", async () => {
+	it("d deletes the entry under the cursor (the cursor follows the newest entry)", async () => {
 		const view = makeView();
 		view.add("a");
 		view.add("b");
 		await flush();
-		view.handleInput(key("k"));
 		view.handleInput(key("d"));
-		assert.deepEqual(view.getEntries().map((e) => e.expr), ["b"]);
+		assert.deepEqual(view.getEntries().map((e) => e.expr), ["a"]);
 	});
 
 	it("enter re-evaluates the entry under the cursor", async () => {
@@ -177,6 +176,136 @@ describe("WatchListView", () => {
 		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "text");
 		view.cycleRendererAt(0);
 		assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "lines", "wraps back within the compatible subset");
+	});
+
+	describe("auto-dispatch + multi-line blocks", () => {
+		function structCtx(): FetchCtx {
+			return makeFetchCtx({
+				evaluateDetailed: async () => ({
+					result: "{...}",
+					type: "struct Player",
+					variablesReference: 7,
+					memoryReference: "0x4000",
+				}),
+				getVariableChildren: async () => [
+					{ name: "hp", value: "99", type: "int", hasChildren: false },
+					{ name: "pos", value: "{...}", type: "Vec2", hasChildren: true, ref: 8, variablesReference: 8 },
+				],
+			});
+		}
+
+		it("auto-picks struct-tree for struct observations", async () => {
+			const view = makeView(structCtx());
+			view.add("player");
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "struct-tree");
+		});
+
+		it("keeps C strings on the string-friendly lines renderer", async () => {
+			const view = makeView({
+				evaluateDetailed: async () => ({
+					result: '"hello\\000\\000"',
+					type: "char [16]",
+					variablesReference: 0,
+					memoryReference: "0x4000",
+				}),
+				readMemory: async () => ({ address: "0x4000", data: new Uint8Array(0) }),
+			});
+			view.add("name");
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "lines");
+			assert.equal(view.getEntries()[0]!.value, '"hello"');
+		});
+
+		it("auto-picks struct-tree for bare C++ class types (regression: showed '—')", async () => {
+			// gdb reports C++ aggregates WITHOUT the struct/class keyword; the
+			// dispatch used to key on that keyword and left `Player` on raw
+			// `lines`, which formats an empty aggregate value as `—`.
+			const view = makeView({
+				evaluateDetailed: async () => ({
+					result: "",
+					type: "Player",
+					variablesReference: 7,
+					memoryReference: "0x4000",
+				}),
+				getVariableChildren: async () => [
+					{ name: "x", value: "99", type: "int", hasChildren: false },
+					{ name: "y", value: "", type: "int [2]", hasChildren: true, ref: 8, variablesReference: 8 },
+					{ name: "z", value: '"hi", \'\\000\' <repeats 13 times>', type: "char [2]", hasChildren: false },
+				],
+				readMemory: async () => ({ address: "0x4000", data: new Uint8Array(0) }),
+			});
+			view.add("p");
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "struct-tree");
+			const text = view.render(60).join("\n");
+			assert.match(text, /> p = Player = \{x = 99, y = \{…\}, z = "hi"\}/);
+			assert.match(text, /^ {2}├─ x: int = 99/m);
+		});
+
+		it("auto-picks array for T[N] observations", async () => {
+			const view = makeView({
+				evaluateDetailed: async () => ({
+					result: "",
+					type: "int [3]",
+					variablesReference: 5,
+					memoryReference: "0x4000",
+				}),
+				getVariableChildren: async () => [
+					{ name: "[0]", value: "10", type: "int", hasChildren: false },
+					{ name: "[1]", value: "20", type: "int", hasChildren: false },
+					{ name: "[2]", value: "30", type: "int", hasChildren: false },
+				],
+				readMemory: async () => ({ address: "0x4000", data: new Uint8Array(0) }),
+			});
+			view.add("ints");
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "array");
+			assert.match(view.getEntries()[0]!.value!, /int \[3\] \{10, 20, 30\}/);
+		});
+
+		it("pretty-prints a struct tree as a multi-line block", async () => {
+			const view = makeView(structCtx());
+			view.add("player");
+			await flush();
+			const text = view.render(60).join("\n");
+			// Root line keeps the type but drops the duplicated expr name; children
+			// indent underneath it.
+			assert.match(text, /player = struct Player = \{\.\.\.\}/);
+			assert.match(text, /^ {2}├─ hp: int = 99/m);
+			assert.match(text, /^ {2}└─ pos: Vec2 = \{\.\.\.\}/m);
+		});
+
+		it("d deletes whole multi-line entries via the row→entry map", async () => {
+			const view = makeView(structCtx());
+			view.add("player"); // multi-line block
+			view.add("hp");
+			await flush();
+			// Cursor follows the newest entry (hp, one row below the tree).
+			view.handleInput(key("d"));
+			assert.deepEqual(view.getEntries().map((e) => e.expr), ["player"]);
+		});
+
+		it("first manual cycle pins the renderer (auto-dispatch stops)", async () => {
+			const view = makeView(structCtx());
+			view.add("player");
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "struct-tree");
+
+			view.cycleRendererAt(0);
+			assert.notEqual(view.getEntries()[0]!.renderSpec.rendererId, "struct-tree");
+			await view.refreshAll();
+			await flush();
+			assert.notEqual(view.getEntries()[0]!.renderSpec.rendererId, "struct-tree", "refresh must not re-dispatch over an explicit choice");
+		});
+
+		it("restored entries are pinned and never auto-dispatch", async () => {
+			const view = makeView(structCtx());
+			view.restore([{ expr: "player", renderSpec: { rendererId: "lines" }, byteCount: 192 }]);
+			await view.refreshAll();
+			await flush();
+			assert.equal(view.getEntries()[0]!.renderSpec.rendererId, "lines");
+		});
 	});
 
 	describe("restore", () => {

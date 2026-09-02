@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { INTERPRETERS, renderBitmap, renderBytes, renderChars, renderCode, renderHexdump, renderInterleaved, renderInterpreter, renderSparkline, renderTable, renderTree, renderTuple, makeBitmapInterpreter } from "../src/viz/interpreters.ts";
+import { INTERPRETERS, renderArray, renderBitmap, renderBytes, renderChars, renderCode, renderHexdump, renderInterleaved, renderInterpreter, renderSparkline, renderTable, renderTree, renderTuple, makeBitmapInterpreter } from "../src/viz/interpreters.ts";
 import { applyTheme } from "../src/theme.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { ViewFlags } from "../src/viz/types.ts";
@@ -425,6 +425,70 @@ describe("renderTree", () => {
 		const [line] = renderTree({ kind: "tree", tree }, undefined, WIDE);
 		assert.ok(line!.endsWith(" …"));
 	});
+
+	it("synthesizes summaries for aggregates gdb left empty", () => {
+		const tree = node("p", "0x7fffffffdba0", {
+			type: "struct Point",
+			hasChildren: true,
+			children: [
+				node("hp", "99", { type: "int" }),
+				node("pos", "", { type: "struct Point", hasChildren: true }),
+				node("name", '"hey", \'\\000\' <repeats 12 times>', { type: "char [16]" }),
+				node("x", "65", { type: "char" }),
+			],
+		});
+		const [line] = renderTree({ kind: "tree", tree }, undefined, WIDE);
+		// Address prefix stays; scalar children format; aggregate/undecodable
+		// children collapse to {…}.
+		assert.equal(stripAnsi(line), "p: struct Point = 0x7fffffffdba0 {hp = 99, pos = {…}, name = \"hey\", x = 65 'A'}");
+	});
+});
+
+describe("renderArray", () => {
+	function arraySnap(type: string, values: string[], total?: number): BindingSnapshot {
+		return {
+			kind: "expression",
+			type,
+			tree: {
+				name: "arr",
+				value: "",
+				type,
+				hasChildren: true,
+				indexedVariables: total,
+				children: values.map((value, i) => ({ name: `[${i}]`, value, type: "int", hasChildren: false })),
+			},
+		};
+	}
+
+	it("renders a one-line element list with the type prefix", () => {
+		const [line] = renderArray(arraySnap("int [4]", ["10", "20", "30", "40"]), undefined, WIDE);
+		assert.equal(stripAnsi(line), "int [4] {10, 20, 30, 40}");
+	});
+
+	it("marks elements that changed since the previous stop", () => {
+		const after = arraySnap("int [4]", ["10", "99", "30", "40"]);
+		const lines = renderArray(after, arraySnap("int [4]", ["10", "20", "30", "40"]), WIDE);
+		assert.ok(lines[0]!.includes("\x1b[38;5;33m99\x1b[0m"));
+		assert.ok(!lines[0]!.includes("\x1b[38;5;33m20\x1b[0m"), "unchanged element must not be marked");
+	});
+
+	it("wraps long arrays at the pane width and truncates by height", () => {
+		const snap = arraySnap("int [60]", Array.from({ length: 60 }, (_, i) => String(i)), 60);
+		const lines = renderArray(snap, undefined, { width: 30, height: 3 });
+		assert.ok(lines.length > 1, "long arrays wrap");
+		const last = stripAnsi(lines.at(-1)!);
+		assert.match(last, /^… \d+ more$/);
+	});
+
+	it("renders an empty array with the type prefix", () => {
+		const [line] = renderArray({ kind: "expression", type: "int [0]", tree: { name: "arr", value: "", type: "int [0]", hasChildren: true, children: [] } }, undefined, WIDE);
+		assert.equal(stripAnsi(line), "int [0] {}");
+	});
+
+	it("shortens template containers with an element count", () => {
+		const [line] = renderArray(arraySnap("std::vector<int, std::allocator<int> >", ["7", "8"], 2), undefined, WIDE);
+		assert.equal(stripAnsi(line), "std::vector<…> · 2 elements {7, 8}");
+	});
 });
 
 describe("renderTable", () => {
@@ -449,13 +513,25 @@ describe("interpreter registry", () => {
 
 	it("exposes the built-in set for the /win pick menu", () => {
 		assert.deepEqual(Object.keys(INTERPRETERS).sort(), [
-			"bitmap", "bytes", "chars", "code", "hexdump", "iasm", "lines", "sparkline", "struct-tree", "table", "text", "tuple",
+			"array", "bitmap", "bytes", "chars", "code", "hexdump", "iasm", "lines", "sparkline", "struct-tree", "table", "text", "tuple",
 		]);
+	});
+
+	it("formats scalar values through the lines renderer", () => {
+		assert.deepEqual(
+			renderInterpreter(INTERPRETERS.lines!, { kind: "expression", value: "65", type: "char" }, undefined, WIDE),
+			["65 'A'"],
+		);
+		assert.deepEqual(
+			renderInterpreter(INTERPRETERS.lines!, { kind: "expression", value: "1", type: "_Bool" }, undefined, WIDE),
+			["true"],
+		);
 	});
 
 	it("declares requirements and explains incompatible observations", () => {
 		assert.deepEqual(INTERPRETERS.hexdump!.requires, ["memory"]);
 		assert.deepEqual(INTERPRETERS["struct-tree"]!.requires, ["tree"]);
+		assert.deepEqual(INTERPRETERS.array!.requires, ["tree"]);
 		assert.deepEqual(renderInterpreter(INTERPRETERS.hexdump!, { kind: "expression", value: "frame", type: "Pixel [4]" }, undefined, WIDE), [
 			"✗ renderer 'hexdump' requires: memory",
 		]);

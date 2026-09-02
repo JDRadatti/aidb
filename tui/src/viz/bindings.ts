@@ -4,7 +4,7 @@
  * so panes can display them and retry on the next stop instead of throwing.
  */
 
-import type { AssemblyLine, Binding, BindingSnapshot, FetchCtx, InterleavedRow, PaneBindingSpec, VarNode } from "./types.ts";
+import type { AssemblyLine, Binding, BindingSnapshot, EvalInfo, FetchCtx, InterleavedRow, PaneBindingSpec, VarNode } from "./types.ts";
 
 /**
  * The persisted form of a binding — the `/win load` spec minus the keyword,
@@ -20,6 +20,7 @@ export function specFromBinding(binding: Binding): PaneBindingSpec | undefined {
 	if (binding instanceof MemoryBinding) return { kind: "mem", at: binding.at, byteCount: binding.byteCount };
 	if (binding instanceof SeriesBinding) return { kind: "plot", expr: binding.expr, historySize: binding.historySize };
 	if (binding instanceof TreeBinding) return { kind: "tree", expr: binding.expr, depth: binding.depth };
+	if (binding instanceof LocalsBinding) return { kind: "locals" };
 	return undefined;
 }
 
@@ -33,6 +34,7 @@ export function bindingFromSpec(spec: PaneBindingSpec): Binding {
 		case "mem": return new MemoryBinding(spec.at, spec.byteCount ?? 192);
 		case "plot": return new SeriesBinding(spec.expr, spec.historySize ?? 120);
 		case "tree": return new TreeBinding(spec.expr, spec.depth ?? 2);
+		case "locals": return new LocalsBinding();
 	}
 }
 
@@ -45,10 +47,88 @@ export function parseGdbNumber(text: string): number | null {
 	return dec ? Number.parseFloat(dec[0]) : null;
 }
 
+/** Shared eager expansion: children are fetched via DAP variablesReferences up
+ * to `depth` levels, within a total-node budget so huge containers cannot
+ * freeze a pane. Deeper levels stay collapsible markers (`hasChildren` with no
+ * `children`). Used by TreeBinding AND ExpressionBinding (so a watch entry's
+ * snapshot can feed the struct-tree / array renderers without a second fetch). */
+async function expandVarTree(
+	ctx: FetchCtx,
+	node: VarNode,
+	reference: number,
+	levelsLeft: number,
+	hasBudget: () => boolean,
+	takeSlot: () => boolean,
+): Promise<void> {
+	if (!node.hasChildren || reference <= 0 || levelsLeft <= 0 || !hasBudget()) return;
+	let children: VarNode[];
+	try {
+		children = await ctx.getVariableChildren(reference);
+	} catch {
+		return; // Leave the node marked expandable; gdb refused this level.
+	}
+	node.children = [];
+	for (const child of children) {
+		if (!takeSlot()) break;
+		const mapped: VarNode = {
+			name: child.name,
+			value: child.value,
+			type: child.type,
+			evaluateName: child.evaluateName,
+			memoryReference: child.memoryReference,
+			variablesReference: child.variablesReference,
+			namedVariables: child.namedVariables,
+			indexedVariables: child.indexedVariables,
+			presentationHint: child.presentationHint,
+			hasChildren: child.hasChildren,
+			ref: child.ref,
+		};
+		node.children.push(mapped);
+		await expandVarTree(ctx, mapped, mapped.ref ?? 0, levelsLeft - 1, hasBudget, takeSlot);
+	}
+}
+
+/** Root node mirroring `EvalInfo`, with (optionally) its children expanded. */
+async function buildVarTree(
+	name: string,
+	info: EvalInfo,
+	ctx: FetchCtx,
+	depth: number,
+	maxNodes: number,
+): Promise<VarNode> {
+	const root: VarNode = {
+		name,
+		value: info.result,
+		type: info.type,
+		memoryReference: info.memoryReference,
+		variablesReference: info.variablesReference,
+		namedVariables: info.namedVariables,
+		indexedVariables: info.indexedVariables,
+		hasChildren: info.variablesReference > 0,
+		ref: info.variablesReference > 0 ? info.variablesReference : undefined,
+	};
+	if (info.variablesReference > 0) {
+		// One unit per rendered child; nodes pay exactly once, at push time, so
+		// re-checking hasBudget at expansion entry never double-charges.
+		let budget = maxNodes - 1;
+		const hasBudget = (): boolean => budget > 0;
+		const takeSlot = (): boolean => {
+			if (!hasBudget()) return false;
+			budget--;
+			return true;
+		};
+		await expandVarTree(ctx, root, info.variablesReference, depth, hasBudget, takeSlot);
+	}
+	return root;
+}
+
 /**
- * Evaluates one expression and enriches its value with type metadata and raw
- * memory when GDB reports a usable memoryReference. A missing or failed memory
- * read is non-fatal: value-only expressions are still useful to renderers.
+ * Evaluates one expression and enriches its value with type metadata, raw
+ * memory (when GDB reports a usable memoryReference) and an eager child tree
+ * (when the expression has a variablesReference — structs, arrays, vectors).
+ * Missing or failed memory/tree reads are non-fatal: value-only observations
+ * are still useful to renderers. The watch entry layer uses the tree to
+ * auto-pick struct-tree / array rendering and to pretty-print aggregates.
  */
 export class ExpressionBinding implements Binding {
 	readonly kind = "expression" as const;
@@ -105,19 +185,27 @@ export class ExpressionBinding implements Binding {
 				// Not addressable — keep the value-only observation.
 			}
 		}
-		if (!memoryReference) {
+		if (memoryReference) {
+			try {
+				const read = await ctx.readMemory(memoryReference, this.byteCount, this.offset);
+				snapshot.address = read.address;
+				snapshot.bytes = read.data;
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				snapshot.info = `raw memory unavailable: ${detail}`;
+			}
+		} else {
 			snapshot.info = "raw memory unavailable for this expression";
-			return snapshot;
 		}
-		try {
-			const read = await ctx.readMemory(memoryReference, this.byteCount, this.offset);
-			snapshot.address = read.address;
-			snapshot.bytes = read.data;
-		} catch (error) {
-		const detail = error instanceof Error ? error.message : String(error);
-		snapshot.info = `raw memory unavailable: ${detail}`;
-	}
-	return snapshot;
+		if (info.variablesReference > 0) {
+			// Depth-2 / 64-node: watch snapshots refresh on every stop, so keep
+			// the eager expense bounded; users cycle to struct-tree for details.
+			// The root VALUE mirrors the enriched snapshot (gdb returns "" for
+			// aggregate evaluate results, so snap.value may have been filled by
+			// the &expr fallback with the address).
+			snapshot.tree = await buildVarTree(this.expr, { ...info, result: snapshot.value ?? "" }, ctx, 2, 64);
+		}
+		return snapshot;
 }
 }
 
@@ -231,64 +319,82 @@ export class TreeBinding implements Binding {
 		} catch (error) {
 			return { kind: this.kind, error: message(error) };
 		}
-		let budget = this.maxNodes - 1; // the root already claimed its slot
+		const root = await buildVarTree(this.expr, info, ctx, this.depth, this.maxNodes);
+		return { kind: this.kind, tree: root };
+	}
+}
+
+/**
+ * The current frame's locals (plus its arguments, grouped) as a live tree —
+ * `info locals` as a watch pane, refreshed on every stop. Arguments collect
+ * under an `args` group so locals stay scannable; nested structs/arrays expand
+ * eagerly via the shared budgeted expansion (like ExpressionBinding). There's
+ * no expression to type: mount with `/win load <pane> locals` and it tracks
+ * whichever frame the debugger is in.
+ */
+export class LocalsBinding implements Binding {
+	readonly kind = "tree" as const;
+	readonly depth = 2;
+	readonly maxNodes = 160;
+
+	identity(): string {
+		return "locals";
+	}
+
+	describe(): string {
+		return "frame locals";
+	}
+
+	async fetch(ctx: FetchCtx): Promise<BindingSnapshot> {
+		if (!ctx.getFrameVariables) {
+			return { kind: this.kind, error: "frame variables are unavailable" };
+		}
+		let args: VarNode[] = [];
+		let locals: VarNode[] = [];
+		try {
+			[args, locals] = await Promise.all([
+				ctx.getFrameVariables("args"),
+				ctx.getFrameVariables("local"),
+			]);
+		} catch (error) {
+			const detail = message(error);
+			// A freshly mounted pane fetches before the first stop; the runner
+			// isn't stopped, so the DAP stackTrace/scopes call dies. Say so in
+			// pane prose instead of leaking the DAP error string.
+			return {
+				kind: this.kind,
+				error: /not stopped|notStopped|stackTrace/i.test(detail)
+					? "no frame yet — stop the program to watch locals"
+					: detail,
+			};
+		}
+
+		const children: VarNode[] = [];
+		if (args.length > 0) {
+			children.push({ name: "args", value: "", hasChildren: true, children: args });
+		}
+		for (const local of locals) children.push(local);
+
+		if (children.length === 0) {
+			return { kind: this.kind, tree: { name: "locals", value: "(none)", hasChildren: false } };
+		}
+
+		// Deepen nested aggregates. The top-level list is already fetched, so
+		// only children with a variablesReference charge the shared budget.
+		let budget = this.maxNodes;
 		const hasBudget = (): boolean => budget > 0;
-		// Charges one unit per rendered child; nodes pay exactly once, at push
-		// time, so re-checking hasBudget at expansion entry never double-charges.
 		const takeSlot = (): boolean => {
 			if (!hasBudget()) return false;
 			budget--;
 			return true;
 		};
-		const root: VarNode = {
-			name: this.expr,
-			value: info.result,
-			type: info.type,
-			memoryReference: info.memoryReference,
-			variablesReference: info.variablesReference,
-			namedVariables: info.namedVariables,
-			indexedVariables: info.indexedVariables,
-			hasChildren: info.variablesReference > 0,
-			ref: info.variablesReference > 0 ? info.variablesReference : undefined,
-		};
-		await this.expand(ctx, root, info.variablesReference, this.depth, hasBudget, takeSlot);
-		return { kind: this.kind, tree: root };
-	}
+		for (const node of [...args, ...locals]) {
+			if (node.ref && hasBudget()) {
+				await expandVarTree(ctx, node, node.ref, this.depth, hasBudget, takeSlot);
+			}
+		}
 
-	private async expand(
-		ctx: FetchCtx,
-		node: VarNode,
-		reference: number,
-		levelsLeft: number,
-		hasBudget: () => boolean,
-		takeSlot: () => boolean,
-	): Promise<void> {
-		if (!node.hasChildren || reference <= 0 || levelsLeft <= 0 || !hasBudget()) return;
-		let children: VarNode[];
-		try {
-			children = await ctx.getVariableChildren(reference);
-		} catch {
-			return; // Leave the node marked expandable; gdb refused this level.
-		}
-		node.children = [];
-		for (const child of children) {
-			if (!takeSlot()) break;
-			const mapped: VarNode = {
-				name: child.name,
-				value: child.value,
-				type: child.type,
-				evaluateName: child.evaluateName,
-				memoryReference: child.memoryReference,
-				variablesReference: child.variablesReference,
-				namedVariables: child.namedVariables,
-				indexedVariables: child.indexedVariables,
-				presentationHint: child.presentationHint,
-				hasChildren: child.hasChildren,
-				ref: child.ref,
-			};
-			node.children.push(mapped);
-			await this.expand(ctx, mapped, mapped.ref ?? 0, levelsLeft - 1, hasBudget, takeSlot);
-		}
+		return { kind: this.kind, tree: { name: "locals", value: "", hasChildren: true, children } };
 	}
 }
 
@@ -324,7 +430,15 @@ export class RegistersBinding implements Binding {
 	}
 }
 
-/** Current source window around the debugger's tracked location. */
+/**
+ * Wide scrollable source buffer around the debugger's tracked location. The
+ * binding fetches a whole-file-sized window (smaller files come back whole,
+ * from line 1) so the pane's View has real content to scroll through; the
+ * real debugger's location stays marked inside it. lineCount is kept only for
+ * the assembly fallback path and the pane's identity.
+ */
+export const MAX_SOURCE_BUFFER = 4000;
+
 export class SourceBinding implements Binding {
 	readonly kind = "source" as const;
 	private lineCount: number;
@@ -358,10 +472,13 @@ export class SourceBinding implements Binding {
 				? { kind: this.kind, error: "source reading and disassembly are unavailable" }
 				: { ...assembly, info: `Source unavailable for ${location.file}; showing assembly only` };
 		}
-		const before = Math.floor((this.lineCount - 1) / 2);
+		// Center a wide buffer on the current line so the pane can scroll both
+		// up and down around it; short files come back whole (start at 1). The
+		// window math keeps the current line inside the buffer when clamped.
+		const before = Math.floor((MAX_SOURCE_BUFFER - 1) / 2);
 		const startLine = Math.max(1, location.line - before);
 		try {
-			const lines = await ctx.readSource(location.file, startLine, this.lineCount);
+			const lines = await ctx.readSource(location.file, startLine, MAX_SOURCE_BUFFER);
 			const breakpoints = ctx.getBreakpoints?.().filter((breakpoint) => breakpoint.line >= startLine && breakpoint.line < startLine + lines.length);
 			return { kind: this.kind, file: location.file, startLine, currentLine: location.line, lines, breakpoints };
 		} catch (error) {

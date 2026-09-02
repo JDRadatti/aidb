@@ -86,6 +86,9 @@ export interface FetchCtx {
 	getBreakpoints?(): SourceBreakpoint[];
 	readSource?(file: string, startLine: number, count: number): Promise<string[]>;
 	disassemble?(memoryReference: string, instructionCount: number, instructionOffset?: number): Promise<AssemblyLine[]>;
+	/** Current frame's variables for a scope (locals/args), as VarNodes. Used by
+	 * the locals pane; returns [] for scopes the frame doesn't have. */
+	getFrameVariables?(scope?: "local" | "args" | "global"): Promise<VarNode[]>;
 }
 
 /**
@@ -133,7 +136,8 @@ export type PaneBindingSpec =
 	| { kind: "iasm" }
 	| { kind: "mem"; at: string; byteCount?: number }
 	| { kind: "plot"; expr: string; historySize?: number }
-	| { kind: "tree"; expr: string; depth?: number };
+	| { kind: "tree"; expr: string; depth?: number }
+	| { kind: "locals" };
 
 export interface Binding {
 	readonly kind: BindingKind;

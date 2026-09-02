@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AssemblyBinding, ExpressionBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, parseGdbNumber } from "../src/viz/bindings.ts";
+import { AssemblyBinding, ExpressionBinding, InterleavedBinding, LocalsBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, MAX_SOURCE_BUFFER, parseGdbNumber } from "../src/viz/bindings.ts";
 import type { FetchCtx, VarNode } from "../src/viz/types.ts";
 
 function makeCtx(over: Partial<FetchCtx> = {}): FetchCtx {
@@ -91,6 +91,58 @@ describe("ExpressionBinding", () => {
 		assert.equal(snap.memoryReference, "0x601000");
 		assert.match(snap.info!, /unmapped/);
 		assert.equal(snap.error, undefined);
+	});
+
+	it("expands an aggregate's children into the snapshot tree", async () => {
+		const snap = await new ExpressionBinding("player").fetch(makeCtx({
+			evaluateDetailed: async () => ({
+				result: "{...}",
+				type: "struct Player",
+				variablesReference: 100,
+				namedVariables: 2,
+				memoryReference: "0x55f1a0",
+			}),
+			getVariableChildren: async (ref) =>
+				ref === 100
+					? [
+							{ name: "hp", value: "99", type: "int", hasChildren: false, evaluateName: "player.hp", memoryReference: "0x55f1a0" },
+							{ name: "pos", value: "{...}", type: "Vec2", hasChildren: true, ref: 200, variablesReference: 200, evaluateName: "player.pos", memoryReference: "0x55f1a4", namedVariables: 2 },
+						]
+					: [{ name: "x", value: "1", hasChildren: false }],
+		}));
+
+		assert.equal(snap.tree!.value, "{...}");
+		assert.equal(snap.tree!.type, "struct Player");
+		assert.equal(snap.tree!.ref, 100);
+		const [, pos] = snap.tree!.children!;
+		assert.equal(pos.type, "Vec2");
+		assert.equal(pos.evaluateName, "player.pos");
+		assert.equal(pos.children![0].name, "x");
+	});
+
+	it("does not build a tree for scalars without a variablesReference", async () => {
+		const snap = await new ExpressionBinding("hp").fetch(makeCtx({
+			evaluateDetailed: async () => ({ result: "100", type: "int", variablesReference: 0 }),
+		}));
+
+		assert.equal(snap.tree, undefined);
+	});
+
+	it("caps the eager watch tree (depth and node budget)", async () => {
+		let requests = 0;
+		const wide = makeCtx({
+			evaluateDetailed: async () => ({ result: "[...]", type: "int [1000]", variablesReference: 1, indexedVariables: 1000 }),
+			getVariableChildren: async () => {
+				requests++;
+				return Array.from({ length: 40 }, (_, i) => ({ name: `[${i}]`, value: String(i), hasChildren: false }));
+			},
+		});
+
+		const snap = await new ExpressionBinding("big", 192).fetch(wide);
+
+		// 64-node budget minus the root caps children at 63.
+		assert.ok((snap.tree!.children?.length ?? 0) <= 63);
+		assert.ok(requests >= 1);
 	});
 
 	it("falls back to &expr when the evaluate lacks an address (gdb arrays)", async () => {
@@ -222,6 +274,69 @@ describe("TreeBinding", () => {
 	});
 });
 
+describe("LocalsBinding", () => {
+	function localCtx(over: Partial<FetchCtx> = {}): FetchCtx {
+		return makeCtx({
+			getFrameVariables: async (scope) =>
+				scope === "args"
+					? [{ name: "argc", value: "1", type: "int", hasChildren: false }]
+					: [
+							{ name: "flag", value: "true", type: "_Bool", hasChildren: false },
+							{ name: "pos", value: "{...}", type: "Vec2", hasChildren: true, ref: 7, variablesReference: 7 },
+						],
+			getVariableChildren: async (ref) =>
+				ref === 7
+					? [
+							{ name: "x", value: "3", hasChildren: false },
+							{ name: "y", value: "4", hasChildren: false },
+						]
+					: [],
+			...over,
+		});
+	}
+
+	it("merges args (grouped) with locals into one tree", async () => {
+		const snap = await new LocalsBinding().fetch(localCtx());
+
+		const tree = snap.tree!;
+		assert.equal(tree.name, "locals");
+		assert.equal(tree.children!.length, 3); // args group + flag + pos
+		const [argsGroup] = tree.children!;
+		assert.equal(argsGroup.name, "args");
+		assert.equal(argsGroup.hasChildren, true);
+		assert.equal(argsGroup.children![0].name, "argc");
+		// Locals sit flat under the root, no extra group.
+		assert.equal(tree.children![1]!.name, "flag");
+		assert.equal(tree.children![2]!.name, "pos");
+	});
+
+	it("expands nested aggregates through the shared budget", async () => {
+		const snap = await new LocalsBinding().fetch(localCtx());
+		const pos = snap.tree!.children![2]!;
+		assert.deepEqual(pos.children?.map((c) => c.name), ["x", "y"]);
+	});
+
+	it("reports an empty frame as (none)", async () => {
+		const snap = await new LocalsBinding().fetch(makeCtx({ getFrameVariables: async () => [] }));
+		assert.equal(snap.tree!.value, "(none)");
+		assert.equal(snap.tree!.hasChildren, false);
+	});
+
+	it("handles a missing fetch hook", async () => {
+		const snap = await new LocalsBinding().fetch(makeCtx({}));
+		assert.match(snap.error!, /unavailable/);
+	});
+
+	it("wraps stop-state failures in a friendly hint", async () => {
+		const snap = await new LocalsBinding().fetch(makeCtx({
+			getFrameVariables: async () => {
+				throw new Error('DAP request "stackTrace" failed: notStopped');
+			},
+		}));
+		assert.match(snap.error!, /stop the program/);
+	});
+});
+
 describe("RegistersBinding", () => {
 	it("splits gdb register rows into cells", async () => {
 		const snap = await new RegistersBinding().fetch(makeCtx({
@@ -239,7 +354,7 @@ describe("RegistersBinding", () => {
 });
 
 describe("SourceBinding", () => {
-	it("reads a centered source window around the current line", async () => {
+	it("reads a wide scrollable buffer centered around the current line", async () => {
 		let request: { file: string; start: number; count: number } | undefined;
 		const snap = await new SourceBinding(5).fetch(makeCtx({
 			getLocation: () => ({ file: "/tmp/example.c", line: 10 }),
@@ -249,24 +364,30 @@ describe("SourceBinding", () => {
 			},
 		}));
 
-		assert.deepEqual(request, { file: "/tmp/example.c", start: 8, count: 5 });
+		assert.deepEqual(request, { file: "/tmp/example.c", start: 1, count: MAX_SOURCE_BUFFER });
 		assert.equal(snap.kind, "source");
 		assert.equal(snap.currentLine, 10);
+		assert.equal(snap.startLine, 1);
 		assert.deepEqual(snap.lines, ["line 8", "line 9", "line 10", "line 11", "line 12"]);
 	});
 
 	it("includes only breakpoints inside the fetched source window", async () => {
-		const snap = await new SourceBinding(3).fetch(makeCtx({
+		const snap = await new SourceBinding().fetch(makeCtx({
 			getLocation: () => ({ file: "/tmp/example.c", line: 10 }),
-			readSource: async () => ["line 9", "line 10", "line 11"],
+			readSource: async (file, start, count) => Array.from({ length: 20 }, (_, i) => `line ${start + i}`),
 			getBreakpoints: () => [
 				{ line: 8, verified: true },
 				{ line: 10, verified: true },
 				{ line: 12, verified: false },
+				{ line: 99, verified: true },
 			],
 		}));
 
-		assert.deepEqual(snap.breakpoints, [{ line: 10, verified: true }]);
+		assert.deepEqual(snap.breakpoints, [
+			{ line: 8, verified: true },
+			{ line: 10, verified: true },
+			{ line: 12, verified: false },
+		]);
 	});
 
 	 it("reports missing source location", async () => {
@@ -288,8 +409,8 @@ describe("SourceBinding", () => {
 			},
 		}));
 
-		assert.deepEqual(request, { file: "/tmp/example.c", start: 11, count: 40 });
-		assert.equal(snap.lines?.length, 40);
+		assert.deepEqual(request, { file: "/tmp/example.c", start: 1, count: MAX_SOURCE_BUFFER });
+		assert.equal(snap.lines?.length, MAX_SOURCE_BUFFER);
 	});
 
 	it("falls back to assembly when source is unavailable", async () => {

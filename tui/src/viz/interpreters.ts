@@ -20,8 +20,10 @@ import {
 	makeHexdumpInterpreter,
 	makeTupleInterpreter,
 	mark,
+	markWith,
 } from "./byte-renderers.ts";
 import { colors } from "../theme.ts";
+import { arrayTypeLabel, formatValue, isStringType, truncateText } from "./format.ts";
 
 export {
 	makeBitmapInterpreter,
@@ -128,10 +130,11 @@ function formatNumber(value: number): string {
 	return Number(value.toFixed(4)).toString();
 }
 
-/** Universal fallback: one value line per snapshot. */
-export function renderValueLines(snap: BindingSnapshot): string[] {
+/** Universal fallback: one formatted value line per snapshot. */
+export function renderValueLines(snap: BindingSnapshot, rect?: Rect): string[] {
 	if (snap.error) return errorLines(snap);
-	return [snap.value ?? "—"];
+	const text = formatValue(snap.value, snap.type, rect?.width ?? 120);
+	return [text === "" ? "—" : text];
 }
 
 /** Render text lines without adding code-specific gutters or markers. */
@@ -291,7 +294,11 @@ export function renderSparkline(snap: BindingSnapshot, _prev: BindingSnapshot | 
 	];
 }
 
-/** Struct tree with ├─/└─ guides; leaf values differing from `prev` get a ▲ marker. */
+/** Struct tree with ├─/└─ guides; leaf values differing from `prev` get a ▲ marker.
+ * Aggregate nodes whose gdb to-string is empty (or just an address) get a
+ * synthesized inline summary: `{hp = 99, pos = {…}, name = "hey"}` — gdb's DAP
+ * returns `""` for struct/array values, which would otherwise render a bare
+ * `=` sign. */
 export function renderTree(snap: BindingSnapshot, prev: BindingSnapshot | undefined, _rect: Rect): string[] {
 	if (snap.error) return errorLines(snap);
 	const tree = snap.tree;
@@ -302,7 +309,7 @@ export function renderTree(snap: BindingSnapshot, prev: BindingSnapshot | undefi
 		if (node.children?.length) {
 			for (const child of node.children) collect(child, path ? `${path}/${child.name}` : child.name);
 		} else {
-			previousValues.set(path, node.value);
+			previousValues.set(path, aggregateSummary(node) ?? formatValue(node.value, node.type, 96));
 		}
 	};
 	if (prev?.tree) collect(prev.tree, prev.tree.name);
@@ -311,7 +318,7 @@ export function renderTree(snap: BindingSnapshot, prev: BindingSnapshot | undefi
 	const emit = (node: VarNode, path: string, prefix: string, isLast: boolean, isRoot: boolean): void => {
 		const guide = isRoot ? "" : prefix + (isLast ? "└─ " : "├─ ");
 		const label = node.type ? `${node.name}: ${node.type}` : node.name;
-		const value = node.value;
+		const value = aggregateSummary(node) ?? formatValue(node.value, node.type, 96);
 		const changed = previousValues.has(path) && previousValues.get(path) !== value;
 		const marker = node.hasChildren && !node.children?.length ? " …" : "";
 		lines.push(`${guide}${label}${mark(changed, ` = ${value}${changed ? " ▲" : ""}`)}${marker}`);
@@ -323,6 +330,105 @@ export function renderTree(snap: BindingSnapshot, prev: BindingSnapshot | undefi
 	};
 	emit(tree, tree.name, "", true, true);
 	return lines;
+}
+
+/**
+ * Inline `{member = value, …}` summary for an aggregate node, or undefined
+ * when the node has no members or its own value is already informative
+ * (gdb prints small structs as `{x = 1, y = 2}` itself). Indexed children
+ * (`[0], [1], …`) print bare values: `{10, 20, 30, …}`.
+ */
+function aggregateSummary(node: VarNode): string | undefined {
+	const children = node.children;
+	if (!children || children.length === 0) return undefined;
+	const raw = (node.value ?? "").trim();
+	if (raw !== "" && !/^0x[0-9a-fA-F]+$/.test(raw)) return undefined;
+	const indexed = children.every((child) => /^(?:\[\d+\]|\d+)$/.test(child.name));
+	const MAX_SHOWN = 6;
+	const parts = children.slice(0, MAX_SHOWN).map((child) => {
+		if (child.hasChildren) return indexed ? "{…}" : `${child.name} = {…}`;
+		const formatted = formatValue(child.value, child.type, 24);
+		const rendered = formatted !== "" ? formatted : looksAggregate(child.type) ? "{…}" : "…";
+		return indexed ? rendered : `${child.name} = ${rendered}`;
+	});
+	const more = children.length > MAX_SHOWN ? ", …" : "";
+	const summary = `{${parts.join(", ")}${more}}`;
+	return raw === "" ? summary : `${raw} ${summary}`;
+}
+
+/** Struct/array/class-ish types can't be summarized without children. */
+function looksAggregate(type: string | undefined): boolean {
+	if (!type) return false;
+	const t = type.trim().toLowerCase();
+	return /\b(?:struct|class|union|enum)\b/.test(t) || /\[\d*\]/.test(t);
+}
+
+/* Pack cells into width-bounded lines: the prefix opens the container and
+ * continuation lines indent under it, so an array reads as one long line
+ * wrapped. `maxLines` caps the output (with room for the caller's tail row);
+ * when cells overflow the cap, `done` is false and `shown` counts only the
+ * cells that actually landed in the returned lines. */
+function packCells(prefix: string, cells: string[], width: number, maxLines: number): { lines: string[]; shown: number; done: boolean } {
+	const indent = " ".repeat(prefix.length);
+	const lines: string[] = [];
+	let line = prefix;
+	let shown = 0;
+	let first = true;
+	for (const cell of cells) {
+		const addition = (first ? "" : ", ") + cell;
+		first = false;
+		if (line.length > prefix.length && visibleWidth(line + addition) > width) {
+			if (lines.length + 1 >= maxLines) {
+				// Pushing this line fills the budget with no room for a
+				// continuation: cells from `cell` on are truncated.
+				lines.push(line);
+				return { lines, shown, done: false };
+			}
+			lines.push(line);
+			line = indent + cell;
+		} else {
+			line += addition;
+		}
+		shown++;
+	}
+	if (visibleWidth(line + "}") > width && line.length > prefix.length) {
+		lines.push(line);
+		lines.push(`${indent}}`);
+	} else {
+		lines.push(line + "}");
+	}
+	return { lines, shown, done: true };
+}
+
+/**
+ * Compact element list for `T [N]` observations (`int[4] {10, 20, 30, 40}`),
+ * wrapping at the pane width; a tail that exceeds `rect.height` is capped
+ * with a `… N more` line. Elements that changed since the previous stop are
+ * marked like other renderers. Works for DAP arrays (`[0]..[N-1]` children)
+ * and std::vector/std::array (element children) alike.
+ */
+export function renderArray(snap: BindingSnapshot, prev: BindingSnapshot | undefined, rect: Rect, flags?: ViewFlags): string[] {
+	if (snap.error) return errorLines(snap);
+	const root = snap.tree;
+	if (!root) return ["waiting for data…"];
+	const children = root.children ?? [];
+	const label = truncateText(`${arrayTypeLabel(root.type, root.indexedVariables)} {`, Math.max(6, rect.width - 4));
+	if (children.length === 0) return [`${label}}`];
+
+	const previous = prev?.tree?.children ?? [];
+	// Long cells (string elements) are capped so packing can’t starve width.
+	const cellWidth = Math.max(8, Math.floor(rect.width * 0.4));
+	const cells = children.map((child, index) => {
+		const changed = previous[index] !== undefined && previous[index].value !== child.value;
+		return markWith(flags, changed, formatValue(child.value, child.type, cellWidth));
+	});
+
+	// Reserve one row for the `… N more` tail.
+	const packed = packCells(label, cells, rect.width, Math.max(1, rect.height - 1));
+	if (packed.done) return packed.lines;
+	const total = root.indexedVariables ?? children.length;
+	const rest = Math.max(0, total - packed.shown);
+	return [...packed.lines, `… ${rest > 0 ? `${rest} ` : ""}more`];
 }
 
 /** Aligned columns (registers etc.); cells differing from `prev` are marked. */
@@ -404,11 +510,12 @@ function effectiveFlags(interpreter: Interpreter, flags?: ViewFlags): ViewFlags 
 
 /** Registry powering the `/win pick` menu and pane mounting. */
 export const INTERPRETERS: Record<string, Interpreter> = {
-	lines: { id: "lines", title: "value lines", requires: ["value"], render: guarded((snap) => renderValueLines(snap)) },
+	lines: { id: "lines", title: "value lines", requires: ["value"], render: guarded((snap, _prev, rect) => renderValueLines(snap, rect)) },
 	text: { id: "text", title: "text", render: guarded((snap) => renderText(snap)) },
 	code: { id: "code", title: "code", requiresAny: ["lines", "assembly"], render: guarded(renderCode) },
 	iasm: { id: "iasm", title: "interleaved assembly", requiresAny: ["interleaved", "assembly"], render: guarded((snap) => renderInterleaved(snap)) },
 	"struct-tree": { id: "struct-tree", title: "struct tree", requires: ["tree"], render: guarded(renderTree) },
+	array: { id: "array", title: "array", requires: ["tree"], render: guarded(renderArray) },
 	sparkline: { id: "sparkline", title: "sparkline", requires: ["samples"], render: guarded(renderSparkline) },
 	hexdump: makeHexdumpInterpreter(),
 	bytes: makeBytesInterpreter(),
@@ -417,6 +524,31 @@ export const INTERPRETERS: Record<string, Interpreter> = {
 	bitmap: makeBitmapInterpreter(),
 	table: { id: "table", title: "table", requires: ["rows"], render: guarded(renderTable) },
 };
+
+/**
+ * Best renderer for a FRESH observation, or undefined when the default
+ * (`lines`, with per-type value formatting) is already a good fit. Drives the
+ * watch pane's auto-dispatch: `/watch player` on a struct shows a tree,
+ * `/watch ints` on an array shows the element list, without manual cycling.
+ * Only fires while the entry is unpinned — the first explicit `/watch cycle`
+ * freezes the choice.
+ */
+export function dispatchRenderer(snap: BindingSnapshot | undefined): string | undefined {
+	if (!snap || snap.error || !snap.type) return undefined;
+	const t = snap.type.trim().toLowerCase();
+	// gdb's to-string is already `"hello"` for C strings / std::string, and a
+	// pointer's address form is more useful than its synthetic `{value = …}`
+	// child tree: keep both on the default lines renderer.
+	if (isStringType(t) || /\bstd::(?:basic_)?string\b/.test(t) || t.includes("*")) return undefined;
+	if (!snap.tree) return undefined;
+	// Raw `T [N]` arrays and std::vector/std::array render as an element list.
+	if (/\[\d*\]/.test(t) || /\bstd::(?:vector|array)\b/.test(t)) return "array";
+	// Any other aggregate WITH children renders as a tree — `struct Player`,
+	// `class Foo`, or a bare C++ class name (`Player`). GDB reports C++ types
+	// WITHOUT the `struct` keyword, so keying on the keyword alone left those
+	// on raw `lines`, which formats an empty aggregate value as `—`.
+	return snap.tree.children && snap.tree.children.length > 0 ? "struct-tree" : undefined;
+}
 
 /** Filter a RenderSpec through an interpreter: flags default to the interpreter's defaults. */
 export function specFlags(interpreter: Interpreter, spec: RenderSpec): ViewFlags {

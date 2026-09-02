@@ -189,6 +189,7 @@ const DEFAULT_LIVE_INTERPRETER: Record<PaneBindingSpec["kind"], string> = {
 	mem: "hexdump",
 	plot: "sparkline",
 	tree: "struct-tree",
+	locals: "struct-tree",
 	source: "code",
 	asm: "code",
 	iasm: "iasm",
@@ -222,6 +223,9 @@ function readLivePane(raw: unknown): SessionLivePane | undefined {
 			spec = { kind: "tree", expr: specRaw.expr, depth: typeof specRaw.depth === "number" ? specRaw.depth : 2 };
 			break;
 		}
+		case "locals":
+			spec = { kind: "locals" };
+			break;
 		default:
 			return undefined;
 	}

@@ -11,13 +11,12 @@
 - each change could also do data diffs or just correlate the data with what was just changed (maybe the data that touches the diff should be also diffed)
 - prompt hints for state assertions and expectations when stepping.
 - locals watch mode
+- remove address of assmbly
+- search through current buffer with /
 
 
 # NEXT — do these first
-1. Better watch visualizations: richer per-type renderers + value formatting
-   for the watch pane (see also TESTING STRATEGY) — structs/arrays
-   pretty-printed, not just scalar + to-string.
-2. Whole-memory pane: a `mem` view that renders a paged window over all of
+1. Whole-memory pane: a `mem` view that renders a paged window over all of
    program memory (base address + scroll/navigation) instead of a single
    address.
 
@@ -25,13 +24,63 @@
 - fuzzy find files (open any file by fuzzy name/path)
 - session tags (release number, commit, gh issue, ...)
 - build tool?
-- whole-memory pane (mem of the program, not one address) → NEXT 2
+- whole-memory pane (mem of the program, not one address) → NEXT 1
 - better pane navigation/controls/resizing (herdr-style? diff prefix?)
 - more gdb features?
 
 # ISSUES
-- better output visualizations for watch windows → NEXT 1
-- mem pane showing all of the program's memory, no address required → NEXT 2
+- mem pane showing all of the program's memory, no address required → NEXT 1
+
+# DONE — watch visualizations (per-type renderers + value formatting, was NEXT 1)
+- `/watch <expr>` AUTO-picks a renderer from the snapshot's type on the first
+  fetch: structs→`struct-tree`, `T[N]`/std::vector/std::array→`array`, while
+  C strings (`char *`, `char [N]`, std::string) and pointers stay on the
+  formatted `lines` value. One manual `/watch cycle`/`/watch flag` pins the
+  choice; restored sessions never re-dispatch.
+- watch entries render MULTI-LINE BLOCKS: a struct tree indents under its
+  root line (`> p = struct Player = 0x… {hp = 99, …}` + ├─ children), an
+  array list wraps at the pane width — pretty-printed in the watch pane
+  itself, not a single mangled to-string. Cursor ops (`d`/Enter) select the
+  whole entry via a row→entry map; stale-row drift after block growth is
+  re-anchored on refresh.
+- `formatValue` per-type scalar formatting (tui/src/viz/format.ts, pure +
+  golden-tested): char glyphs (`104 'h'`), `_Bool`/bool 0|1→true/false, float
+  rounding (3.1400000000000001→3.14), whitespace collapse, truncation;
+  char-array values drop nul padding AND gdb's repeat elision
+  (`"hey", '\000' <repeats 12 times>`→`"hey"`). Applied by the `lines`
+  renderer and the struct-tree's leaf values.
+- struct-tree summarizes aggregate nodes gdb left with an empty/address
+  value: `0x7fff… {hp = 99, pos = {…}, name = "hey"}`; nested scalars format
+  per type; leaves that differ from the previous stop keep the ▲ marker.
+- new `array` renderer (watch panes + `/win load <pane> array <expr>`,
+  slash completion + help updated): `int[4] {10, 20, 30, 40}`, wraps at the
+  pane width, `… N more` tail at the pane height, changed elements marked;
+  std::vector types shorten to `std::vector<…> · N elements`.
+- ExpressionBinding snapshots now carry an eager depth-2 / 64-node child
+  tree when a variablesReference exists (shared expansion with TreeBinding),
+  so dispatch + pretty summaries need no extra fetch round-trips.
+- tests: viz-format.test.ts (formatValue rules), renderArray + summary tests,
+  ExpressionBinding tree tests, watch auto-dispatch/pinning/multi-line tests —
+  real-gdb smoke test at test/smoke-watch.mjs.
+- WATCH LOCALS: `/win load <pane> locals` binds a live frame-locals pane
+  (LocalsBinding + struct-tree): args group + locals flat, nested structs /
+  arrays expand eagerly (shared budget, depth 2 / 160 nodes), per-type value
+  formatting and empty/not-stopped fallbacks. Re-fetches on every stop, so it
+  tracks the frame the debugger moves through — `info locals` as a watch pane.
+  Persists in layouts (PaneBindingSpec `{kind:"locals"}` + session-store
+  default interpreter), slash completions + help updated. Core's existing
+  `getVariables(scope)` is surfaced as `FetchCtx.getFrameVariables`.
+- FIXED: `/watch p` on a C++ struct showed `—` (bare class type `Player`,
+  no `struct` keyword). dispatchRenderer keyed on the struct/class/union
+  keyword, so bare C++ aggregate types fell through to raw `lines`, which
+  formats an empty aggregate as `—`. Dispatch now falls back to struct-tree
+  for ANY aggregate with children (strings/pointers/std::vector|array still
+  take their dedicated paths) — actual gdb: `> p = Player = {x = 99, y = {…},
+  z = "hi"}` with the ├─ tree beneath. Regression test in watch.test.ts.
+- lowdown: the old watch `add()` never parked the cursor on the new entry
+  (stale lineCount from the content cache stuck it at 0); the rewrite makes
+  the documented intent true (cursor follows the added entry), and the old
+  `d deletes` test encoded the bug — updated to assert the real behavior.
 
 # DECIDED
 - layout watch windows are not saved when canceling/reopening: sessions keep

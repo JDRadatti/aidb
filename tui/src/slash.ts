@@ -111,6 +111,8 @@ const VISUALS: AutocompleteItem[] = [
 	{ value: "mem", label: "mem", description: "memory at an expression" },
 	{ value: "plot", label: "plot", description: "sparkline samples of an expression" },
 	{ value: "tree", label: "tree", description: "struct tree of an expression" },
+	{ value: "array", label: "array", description: "compact element list of an array" },
+	{ value: "locals", label: "locals", description: "frame locals + args, refreshed on every stop" },
 	{ value: "source", label: "source", description: "source lines" },
 	{ value: "asm", label: "asm", description: "assembly" },
 	{ value: "iasm", label: "iasm", description: "interleaved source+assembly" },

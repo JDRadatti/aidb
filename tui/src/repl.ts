@@ -6,12 +6,14 @@ import type { DebuggerAPI } from "@earendil-works/pi-debugger-core";
 import type { WindowManager } from "./window-manager.ts";
 import type { SplitDir } from "./split-tree.ts";
 import { LivePaneView } from "./views/live-pane.ts";
+import { View } from "./view.ts";
+import { ReplTranscript } from "./repl-log.ts";
 import { WatchListView } from "./views/watch.ts";
-import { AssemblyBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
+import { AssemblyBinding, InterleavedBinding, LocalsBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec } from "./viz/bindings.ts";
 import { INTERPRETERS } from "./viz/interpreters.ts";
 import { colors, dimPlaceholders } from "./theme.ts";
 import { VIEW_FLAG_META, ViewFlags } from "./viz/types.ts";
-import type { Binding, FetchCtx, LivePane } from "./viz/types.ts";
+import type { Binding, FetchCtx, LivePane, VarNode } from "./viz/types.ts";
 import type { ActivitySpinner } from "./spinner.ts";
 import {
 	canonicalThemeName,
@@ -142,7 +144,7 @@ const HELP = [
 	"  set disassembly-flavor intel|att   choose x86 Intel or AT&T syntax",
 	"  /win load <pane> iasm      source lines with mapped assembly beneath them",
 	"  /watch <expr>               pin an expression to a live watch pane across stops",
-	"  /win load <pane> <spec>     bind a live visualizer: regs · mem <expr> [bytes] · plot n · tree s · source · asm",
+	"  /win load <pane> <spec>     bind a live visualizer: regs · mem <expr> [bytes] · plot n · tree s · array s · locals · source · asm",
 	"",
 	"Windows (manual): /win vsplit [idx] [name] | hsplit [idx] [name] | close <idx|name> | swap <a> [b] | next | list;",
 	"  /win pick [idx] [view] swaps how a live pane renders; /win switch <idx|name> focuses a pane.",
@@ -195,8 +197,8 @@ const WIN_HELP = [
 	"                                              cycle the renderer or toggle a flag on",
 	"                                              entry n (default: the last added)",
 	"  /win load <idx|name> <what>                 bind a view into a pane:",
-	"                                              watch · regs · mem <expr> · plot <expr>",
-	"                                              · tree <expr> · source · asm",
+	"                                              watch · regs · mem <expr> · plot <expr> · tree <expr>",
+	"                                              · array <expr> · locals · source · asm",
 	"                                              mem suffix is raw byte count (default 192),",
 	"                                              not tuples — e.g. mem frame 12 = 12 bytes",
 	"                                              watch mounts a live watch pane; /watch adds entries",
@@ -398,6 +400,12 @@ export function parseLoadSpec(spec: string, ctx?: ReplContext): { binding: Bindi
 		case "tree":
 			if (!argument) return undefined;
 			return { binding: new TreeBinding(argument), interpreterId: "struct-tree" };
+		case "array":
+			if (!argument) return undefined;
+			return { binding: new TreeBinding(argument), interpreterId: "array" };
+		case "locals":
+			if (argument) return undefined;
+			return { binding: new LocalsBinding(), interpreterId: "struct-tree" };
 		case "source":
 		case "src":
 			if (argument) return undefined;
@@ -458,6 +466,34 @@ function flagBit(name: string): ViewFlags | undefined {
 const SOURCE_LINES_CACHE = new Map<string, string[]>();
 const MAX_SOURCE_FILES = 16;
 
+/** Map a core Variable to a viz VarNode; shared by getVariableChildren and
+ * getFrameVariables so locals/args land in the same shape as tree children. */
+function toVarNode(variable: {
+	name: string;
+	value: string;
+	type?: string;
+	variablesReference: number;
+	namedVariables?: number;
+	indexedVariables?: number;
+	memoryReference?: string;
+	presentationHint?: Record<string, unknown>;
+	evaluateName?: string;
+}): VarNode {
+	return {
+		name: variable.name,
+		value: variable.value,
+		type: variable.type || undefined,
+		evaluateName: variable.evaluateName,
+		memoryReference: variable.memoryReference,
+		variablesReference: variable.variablesReference,
+		namedVariables: variable.namedVariables,
+		indexedVariables: variable.indexedVariables,
+		presentationHint: variable.presentationHint,
+		hasChildren: variable.variablesReference > 0,
+		ref: variable.variablesReference > 0 ? variable.variablesReference : undefined,
+	};
+}
+
 function cachedFileLines(file: string): Promise<string[]> {
 	const hit = SOURCE_LINES_CACHE.get(file);
 	if (hit) return Promise.resolve(hit);
@@ -490,20 +526,9 @@ function makeFetchCtx(ctx: ReplContext): FetchCtx {
 		},
 		getVariableChildren: async (reference, start, count) => {
 			const children = await ctx.getApi().getVariableChildren(reference, start, count);
-			return children.map((child) => ({
-				name: child.name,
-				value: child.value,
-				type: child.type || undefined,
-				evaluateName: child.evaluateName,
-				memoryReference: child.memoryReference,
-				variablesReference: child.variablesReference,
-				namedVariables: child.namedVariables,
-				indexedVariables: child.indexedVariables,
-				presentationHint: child.presentationHint,
-				hasChildren: child.variablesReference > 0,
-				ref: child.variablesReference > 0 ? child.variablesReference : undefined,
-			}));
+			return children.map(toVarNode);
 		},
+		getFrameVariables: (scope) => ctx.getApi().getVariables(scope ?? "local").then((variables) => variables.map(toVarNode)),
 		readMemory: (expression, count, offset) => ctx.getApi().readMemory(expression, count, offset),
 		disassemble: (memoryReference, instructionCount) => ctx.getApi().disassemble(memoryReference, instructionCount),
 	};
@@ -872,6 +897,20 @@ async function handleGdbCommand(input: string, ctx: ReplContext): Promise<void> 
 			io.error(`'${command}' needs its slash form: /${command} ...`);
 			break;
 
+case "up":
+		case "down": {
+			// Scroll whichever pane the user is actually looking at: the focused
+			// pane scrolled by half a page, or the repl transcript if that pane
+			// isn't scrollable (e.g. the tab bar). Handy for inspecting a long
+			// source file in a source pane.
+			const pane = ctx.windows.component(ctx.windows.active);
+			if ((pane instanceof View || pane instanceof ReplTranscript) && pane) {
+				pane.handleInput(command === "up" ? "\x1b[5~" : "\x1b[6~");
+			}
+			ctx.requestRender();
+			break;
+		}
+
 		default:
 			await passthrough(input, ctx);
 	}
@@ -966,7 +1005,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 		}
 		case "load": {
 			if (rest.length < 2) {
-				io.error("Usage: /win load <idx|name> watch | regs | mem <expr> | plot <expr> | tree <expr> | source | asm");
+				io.error("Usage: /win load <idx|name> watch | regs | mem <expr> | plot <expr> | tree <expr> | array <expr> | locals | source | asm");
 				return;
 			}
 			const target = windows.resolve(rest[0]);
@@ -990,7 +1029,7 @@ async function handleWin(args: string, ctx: ReplContext): Promise<void> {
 			}
 			const parsed = parseLoadSpec(specWords.join(" "), ctx);
 			if (!parsed) {
-				io.error("Cannot visualize " + JSON.stringify(specWords.join(" ")) + `. Try: watch · regs · mem <expr> · plot <expr> · tree <expr> · source · asm`);
+				io.error("Cannot visualize " + JSON.stringify(specWords.join(" ")) + `. Try: watch · regs · mem <expr> · plot <expr> · tree <expr> · array <expr> · locals · source · asm`);
 				return;
 			}
 			const view = new LivePaneView(parsed.binding, parsed.interpreterId, makeFetchCtx(ctx), {

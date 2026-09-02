@@ -28,6 +28,8 @@ export class LivePaneView extends View implements LivePane {
 	private refetch = false;
 	/** Keep the first assembly location centered through the initial pane resize. */
 	private centerAssemblyOnResize = false;
+	/** The location the current source buffer is anchored on (line number). */
+	private sourceAnchorLine: number | undefined;
 
 	constructor(binding: Binding, interpreterId: string, fetchCtx: FetchCtx, options: ViewOptions = {}, flags?: ViewFlags) {
 		super(options.id ?? "live", { ...options, title: options.title ?? LivePaneView.titleFor(binding, interpreterId) });
@@ -83,6 +85,7 @@ export class LivePaneView extends View implements LivePane {
 		this.snap = undefined;
 		this.prevSnap = undefined;
 		this.centerAssemblyOnResize = false;
+		this.sourceAnchorLine = undefined;
 		this.refetch = this.fetching;
 		this.touch();
 	}
@@ -127,7 +130,9 @@ export class LivePaneView extends View implements LivePane {
 							this.centerCursor(current);
 							this.centerAssemblyOnResize = true;
 						}
-				}
+					} else if (next.kind === "source" && next.lines && next.startLine !== undefined && next.currentLine !== undefined) {
+						this.anchorSource(next.lines.length, next.startLine, next.currentLine);
+					}
 			}
 		} catch (error) {
 			// Bindings promise not to throw; keep the pane alive regardless.
@@ -143,6 +148,25 @@ export class LivePaneView extends View implements LivePane {
 				void this.refreshAll();
 			}
 		}
+	}
+
+	/**
+	 * Center the pane on the debugger's current source line. The source
+	 * binding fetches a wide buffer with the location somewhere inside, so the
+	 * View's cursor must be moved to that line or the window would show the
+	 * top of the buffer and hide the ▶. Refresh events fire several times for a
+	 * single stop, so only re-anchor when the tracked line actually moved —
+	 * preserving the user's scroll while looking around a stopped frame.
+	 */
+	private anchorSource(bufferLines: number, startLine: number, currentLine: number): void {
+		const count = Math.max(1, bufferLines);
+		const index = currentLine - startLine;
+		if (index === this.sourceAnchorLine) return;
+		this.sourceAnchorLine = index;
+		this.cursorLine = Math.max(0, Math.min(count - 1, index));
+		const maxScroll = Math.max(0, count - this.getViewportHeight());
+		this.scrollRow = Math.max(0, Math.min(maxScroll, this.cursorLine - Math.floor(this.getViewportHeight() / 2)));
+		this.changed();
 	}
 
 	protected content(width: number): string[] {

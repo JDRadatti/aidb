@@ -13,7 +13,7 @@ export type { FlagDescriptor } from "./types.ts";
 /** Renderer ids in display/cycle order; a pane's flag surface is renderer-independent. */
 export const RENDERER_ORDER: readonly string[] = [
 	"lines", "text", "bytes", "chars", "tuple", "bitmap", "hexdump",
-	"code", "iasm", "struct-tree", "sparkline", "table",
+	"code", "iasm", "struct-tree", "array", "sparkline", "table",
 ];
 
 export interface RenderSpec {

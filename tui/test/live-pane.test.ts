@@ -6,7 +6,7 @@ import { SplitTree } from "../src/split-tree.ts";
 import { WindowManager } from "../src/window-manager.ts";
 import { LivePaneView } from "../src/views/live-pane.ts";
 import { WatchListView } from "../src/views/watch.ts";
-import { ExpressionBinding, InterleavedBinding, MemoryBinding, RegistersBinding, SeriesBinding, TreeBinding, bindingFromSpec, specFromBinding } from "../src/viz/bindings.ts";
+import { ExpressionBinding, InterleavedBinding, LocalsBinding, MemoryBinding, RegistersBinding, SeriesBinding, SourceBinding, TreeBinding, bindingFromSpec, specFromBinding } from "../src/viz/bindings.ts";
 import { ViewFlags } from "../src/viz/types.ts";
 import type { BindingSnapshot, PaneBindingSpec } from "../src/viz/types.ts";
 
@@ -51,6 +51,8 @@ describe("parseLoadSpec", () => {
 		assert.equal(parseLoadSpec("plot hp")?.interpreterId, "sparkline");
 		assert.ok(parseLoadSpec("tree player")?.binding instanceof TreeBinding);
 		assert.equal(parseLoadSpec("tree player")?.interpreterId, "struct-tree");
+		assert.ok(parseLoadSpec("locals")?.binding instanceof LocalsBinding);
+		assert.equal(parseLoadSpec("locals")?.interpreterId, "struct-tree");
 		assert.ok(parseLoadSpec("iasm")?.binding instanceof InterleavedBinding);
 		assert.equal(parseLoadSpec("iasm")?.interpreterId, "iasm");
 	});
@@ -62,6 +64,7 @@ describe("parseLoadSpec", () => {
 		assert.equal(parseLoadSpec("mem"), undefined);
 		assert.equal(parseLoadSpec("plot"), undefined);
 		assert.equal(parseLoadSpec("tree"), undefined);
+		assert.equal(parseLoadSpec("locals now"), undefined);
 		assert.equal(parseLoadSpec("regs now"), undefined);
 		assert.equal(parseLoadSpec("wat is this"), undefined);
 	});
@@ -78,6 +81,7 @@ describe("parseLoadSpec", () => {
 				["mem frame 12", { kind: "mem", at: "frame", byteCount: 12 }],
 				["plot hp", { kind: "plot", expr: "hp", historySize: 120 }],
 				["tree player", { kind: "tree", expr: "player", depth: 2 }],
+				["locals", { kind: "locals" }],
 			];
 			for (const [spec, expected] of cases) {
 				const parsed = parseLoadSpec(spec)!;
@@ -124,6 +128,28 @@ describe("parseLoadSpec", () => {
 		await view.refreshAll();
 		const lines = view.render(60);
 		assert.ok(lines.some((line) => line.includes("41 42")), `expected bytes in ${JSON.stringify(lines)}`);
+	});
+
+	it("anchors source scroll on the current line, then scrolls its buffer", async () => {
+		const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+		const ctx = makeContext({
+			getLocation: () => ({ file: "/tmp/example.c", line: 60 }),
+			readSource: async (_file: string, start: number, count: number) =>
+				Array.from({ length: count }, (_, i) => `line ${start + i}`),
+			getBreakpoints: () => [],
+		});
+		const view = new LivePaneView(new SourceBinding(), "code", ctx.ctx.getApi() as never, { viewportHeight: 10 });
+		await view.refreshAll();
+
+		// The current line (60) sits inside the wide buffer; the pane centers on it.
+		const anchored = view.render(60);
+		assert.ok(anchored.some((line) => plain(line).includes("▶") && plain(line).includes("line 60")), `expected ▶ at line 60, got:\n${anchored.join("\n")}`);
+
+		// pageUp scrolls toward the top of the buffer; the anchored line moves off.
+		view.handleInput("\x1b[5~");
+		const scrolled = view.render(60);
+		assert.ok(scrolled.some((line) => /line \d+/.test(plain(line))), `expected source lines after scroll, got:\n${scrolled.join("\n")}`);
+		assert.ok(!scrolled.some((line) => plain(line).includes("line 60")), "current line should be scrolled off");
 	});
 
 	it("renders binding failures as an error frame instead of throwing", async () => {
