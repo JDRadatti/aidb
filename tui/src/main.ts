@@ -6,6 +6,7 @@ import {
 	TUI_KEYBINDINGS,
 	TuiMainScreen,
 	matchesKey,
+	isKeyRelease,
 	setKeybindings,
 	visibleWidth,
 	type Component,
@@ -892,7 +893,7 @@ tui.addChild(statusBar);
 tui.setFocus(editor);
 
 /** vim navigation keys routed to the active pane when the editor is empty. */
-const PANE_NAV_KEYS = new Set<string>(["end", "home", "ctrl+d", "ctrl+u"]);
+const PANE_NAV_KEYS = ["end", "home", "ctrl+d", "ctrl+u"] as const;
 
 /** Resolve an Action -> handler, guarding on the target being stopped. */
 const actionHandlers: Record<Action, (data: string) => void> = {
@@ -962,7 +963,65 @@ function actionFor(data: string): Action | null {
 	return resolveAction(config.keybindings.actions, data);
 }
 
-tui.addInputListener((data): { consume: boolean } | undefined => {
+/**
+ * Some terminals (kitty-protocol / modifyOtherKeys implementations such as
+ * wezterm, foot, Windows Terminal) encode modified navigation keys with CSI-u
+ * forms that pi-tui's key parser does not yet recognise:
+ *
+ *   \x1b[1;5u      Ctrl+Up arrow    (codepoint 1..4 = arrows)
+ *   \x1b[5;5u      Ctrl+PgUp        (codepoint 5..8 = pgup/pgdn/home/end)
+ *   \x1b[27;4;65~  Ctrl+Up arrow    (xterm modifyOtherKeys mode 2)
+ *
+ * Rewrite those into the legacy `\x1b[...;...[A-DHF~]` sequences pi-tui
+ * understands so scroll and pane-navigation keys work regardless of which
+ * keyboard protocol got negotiated. Only modifier-qualified forms are
+ * rewritten; bare sequences pass through so typed ESC-prefixed text is never
+ * misread as a key.
+ */
+function normalizeScrollKeySequence(data: string): string {
+	if (data.length > 16 || data.includes("\x1b[200~")) return data;
+	// Wire modifier encodings: kitty/CSI-u use mask+1 (ctrl=5, ctrl+shift=7),
+	// xterm modifyOtherKeys uses the raw mask (ctrl=4, ctrl+shift=6). Fold both
+	// onto the legacy `\x1b[1;<mod>X` coding (ctrl=5, ctrl+shift=7).
+	const legacyMod = (wire: number): string | null => {
+		switch (wire) {
+			case 2: case 3: return String(wire);
+			case 4: case 5: return "5";
+			case 6: case 7: return "7";
+			default: return null;
+		}
+	};
+	const arrows = ["A", "B", "C", "D"]; // up/down/right/left
+	let m = data.match(/^\x1b\[([1234]);(\d+)u$/);
+	if (m) {
+		const mod = legacyMod(Number(m[2]));
+		return mod ? `\x1b[1;${mod}${arrows[Number(m[1]) - 1]}` : data;
+	}
+	m = data.match(/^\x1b\[(5|6|7|8);(\d+)u$/);
+	if (m) {
+		const mod = legacyMod(Number(m[2]));
+		if (!mod) return data;
+		if (m[1] === "7") return `\x1b[1;${mod}H`;
+		if (m[1] === "8") return `\x1b[1;${mod}F`;
+		return `\x1b[${m[1]};${mod}~`;
+	}
+	m = data.match(/^\x1b\[27;(\d+);(6[5-8])~$/);
+	if (m) {
+		const mod = legacyMod(Number(m[1]));
+		return mod ? `\x1b[1;${mod}${arrows[Number(m[2]) - 65]}` : data;
+	}
+	return data;
+}
+
+tui.addInputListener((raw): { consume: boolean; data?: string } | undefined => {
+	// kitty-protocol terminals (flag 2 "report event types") deliver a press
+	// (:1) AND a release (:3) event for every physical key. pi-tui filters
+	// releases only right before the focused component — AFTER input
+	// listeners — so without this, every key handled here (actions, pane nav)
+	// fires twice per press and releases cancel confirms / recall history.
+	if (isKeyRelease(raw) && !raw.includes("\x1b[200~")) return { consume: true };
+
+	const data = normalizeScrollKeySequence(raw);
 	// A pending confirm owns every key: Enter confirms, Esc/ctrl+c cancels.
 	// Consumed before the picker/editor/actions so nothing else acts mid-gate.
 	if (pendingConfirm) {
@@ -1013,11 +1072,14 @@ tui.addInputListener((data): { consume: boolean } | undefined => {
 	// Unbound pane-navigation keys: when the editor isn't being typed into,
 	// end/home and Ctrl+D/U scroll the ACTIVE pane (vim-style) instead of
 	// falling through to the editor. Letters stay typable.
-	if (!editor.getText() && PANE_NAV_KEYS.has(data)) {
+	if (!editor.getText() && PANE_NAV_KEYS.some((name) => matchesKey(data, name))) {
 		scrollActivePane(data);
 		return { consume: true };
 	}
 
+	// Let the focused editor see rewritten (legacy) sequences instead of the
+	// raw exotic bytes it would otherwise receive unchanged.
+	if (data !== raw) return { consume: false, data };
 	return undefined;
 });
 
