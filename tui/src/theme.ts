@@ -15,10 +15,7 @@ import type { ThemeConfig } from "./config.ts";
 const RESET = "\x1b[0m";
 
 function fg(code: number): (s: string) => string {
-	// Codes <128 are legacy/vivid (0-15, 30-37, 90-97). Codes >=128 need the
-	// explicit 256-colour foreground form, otherwise a bare \x1b[245m is invalid.
-	const seq = code >= 128 ? `38;5;${code}` : String(code);
-	return (s: string) => `\x1b[${seq}m${s}${RESET}`;
+	return (s: string) => `\x1b[38;5;${code}m${s}${RESET}`;
 }
 
 /** 256-colour background fill for panes (uses the `48;5` form, not fg `+30`). */
@@ -201,7 +198,7 @@ export function createEditorTheme(theme: ThemeConfig | undefined): EditorTheme {
 		borderColor: (s) => fg(theme?.border ?? 90)(s),
 		selectList: {
 			selectedPrefix: (s) => c.accent(s),
-			selectedText: (s) => `\x1b[${theme?.accent ?? 36};1m${s}${RESET}`,
+			selectedText: (s) => `\x1b[38;5;${theme?.accent ?? 36};1m${s}${RESET}`,
 			description: (s) => c.muted(s),
 			scrollInfo: (s) => c.muted(s),
 			noMatch: (s) => c.error(s),

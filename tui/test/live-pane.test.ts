@@ -286,7 +286,7 @@ describe("parseLoadSpec", () => {
 		value = 2; // next stop changes rax
 		await view.refreshAll(true);
 		const highlighted = view.render(40).join("\n");
-		assert.match(highlighted, /\x1b\[33m0x2/);
+		assert.match(highlighted, /\x1b\[38;5;33m0x2/);
 
 		await view.refreshAll(false); // same stop: location/breakpoints duplicate
 		assert.equal(view.render(40).join("\n"), highlighted, "highlight must survive the duplicate fetch");

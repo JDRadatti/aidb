@@ -42,7 +42,7 @@ describe("renderHexdump", () => {
 		const lines = renderHexdump(snap, prev, WIDE);
 
 		assert.ok(lines[0]!.includes("· 1 changed"));
-		assert.ok(lines[1]!.includes("\x1b[33m03\x1b[0m"), "changed hex byte not marked");
+		assert.ok(lines[1]!.includes("\x1b[38;5;33m03\x1b[0m"), "changed hex byte not marked");
 	});
 
 	it("regression: marks changed bytes without losing hex cells", () => {
@@ -151,26 +151,26 @@ describe("byte renderers", () => {
 		const full = renderHexdump(snap, prev, WIDE);
 		assert.ok(full[1]!.startsWith("0x4000"), "gutter shown by default");
 		assert.ok(stripAnsi(full[1]!).includes("|AB"), "ascii column shown by default");
-		assert.ok(full[1]!.includes("\x1b[33m"), "change marking on by default");
+		assert.ok(full[1]!.includes("\x1b[38;5;33m"), "change marking on by default");
 
 		const noGutter = renderHexdump(snap, prev, WIDE, 0);
 		assert.ok(!noGutter[1]!.trimStart().startsWith("0x4000"), "gutter hidden with flags=0");
 		assert.ok(!stripAnsi(noGutter[1]!).includes("|"), "ascii column hidden with flags=0");
 
 		const noChanges = renderBytes(snap, prev, WIDE, {}, ViewFlags.HIDE_CHANGES);
-		assert.ok(!noChanges[1]!.includes("\x1b[33m"), "change marking disabled by HIDE_CHANGES");
+		assert.ok(!noChanges[1]!.includes("\x1b[38;5;33m"), "change marking disabled by HIDE_CHANGES");
 	});
 });
 
 describe("renderCode", () => {
 	it("renders source lines with a current-line marker", () => {
 		const lines = renderCode({ kind: "source", file: "example.c", startLine: 9, currentLine: 10, lines: ["int main()", "return 0;"] }, undefined, WIDE);
-		assert.match(lines[0]!, /^        9 \x1b\[90m│\x1b\[0m \x1b\[36mint\x1b\[0m main\(\)$/);
+		assert.match(lines[0]!, /^        9 \x1b\[38;5;90m│\x1b\[0m \x1b\[38;5;36mint\x1b\[0m main\(\)$/);
 		// The current row is wrapped like the fuzzy picker's selected row:
 		// bold + accent over the WHOLE line, re-opened after each token reset
 		// so token colours survive inside the highlight; the muted rail is
 		// re-opened too, staying dim inside the wrap.
-		assert.match(lines[1]!, /^\x1b\[1m\x1b\[36m▶      10 \x1b\[90m│\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[36mreturn\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[33m0\x1b\[0m\x1b\[1m\x1b\[36m;\x1b\[0m$/);
+		assert.match(lines[1]!, /^\x1b\[1m\x1b\[38;5;36m▶      10 \x1b\[38;5;90m│\x1b\[0m\x1b\[1m\x1b\[38;5;36m \x1b\[38;5;36mreturn\x1b\[0m\x1b\[1m\x1b\[38;5;36m \x1b\[38;5;33m0\x1b\[0m\x1b\[1m\x1b\[38;5;36m;\x1b\[0m$/);
 	});
 
 	it("renders aligned verified and pending breakpoint markers", () => {
@@ -181,10 +181,10 @@ describe("renderCode", () => {
 			breakpoints: [{ line: 9, verified: true }, { line: 11, verified: false }],
 		}, undefined, WIDE);
 
-		assert.match(lines[0]!, /\x1b\[31m●\x1b\[0m/);
-		assert.match(lines[0]!, /●\x1b\[0m     9 \x1b\[90m│\x1b\[0m \x1b\[36mint\x1b\[0m main\(\)/);
-		assert.match(lines[2]!, /\x1b\[31m○\x1b\[0m/);
-		assert.match(lines[2]!, /○\x1b\[0m    11 \x1b\[90m│\x1b\[0m done\(\)/);
+		assert.match(lines[0]!, /\x1b\[38;5;31m●\x1b\[0m/);
+		assert.match(lines[0]!, /●\x1b\[0m     9 \x1b\[38;5;90m│\x1b\[0m \x1b\[38;5;36mint\x1b\[0m main\(\)/);
+		assert.match(lines[2]!, /\x1b\[38;5;31m○\x1b\[0m/);
+		assert.match(lines[2]!, /○\x1b\[0m    11 \x1b\[38;5;90m│\x1b\[0m done\(\)/);
 	});
 
 	it("highlights conservative C/C++ syntax without changing source text", () => {
@@ -194,8 +194,8 @@ describe("renderCode", () => {
 			lines: ['int answer = 42; // return "unchanged"'],
 		}, undefined, WIDE);
 
-		assert.match(line!, /\x1b\[36mint\x1b\[0m answer = \x1b\[33m42\x1b\[0m;/);
-		assert.match(line!, /\x1b\[90m\/\/ return "unchanged"\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;36mint\x1b\[0m answer = \x1b\[38;5;33m42\x1b\[0m;/);
+		assert.match(line!, /\x1b\[38;5;90m\/\/ return "unchanged"\x1b\[0m/);
 	});
 
 	it("parses full numeric literals as ONE number token (decimals, exponents, hex, suffixes)", () => {
@@ -207,12 +207,12 @@ describe("renderCode", () => {
 		// Each literal is a single `number`-role token (default code 33): the
 		// old regex stopped at the first dot (`3.5f` -> `3` + stray `5f`) and
 		// left `0x1F`/`1e3`/`42uL` completely uncolored.
-		assert.match(line!, /\x1b\[33m3\.5f\x1b\[0m/);
-		assert.match(line!, /\x1b\[33m1\.5e-3\x1b\[0m/);
-		assert.match(line!, /\x1b\[33m0x1F\x1b\[0m/);
-		assert.match(line!, /\x1b\[33m42uL\x1b\[0m/);
-		assert.match(line!, /\x1b\[33m3\.5\x1b\[0m/);
-		assert.equal((line!.match(/\x1b\[33m/g) ?? []).length, 5);
+		assert.match(line!, /\x1b\[38;5;33m3\.5f\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;33m1\.5e-3\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;33m0x1F\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;33m42uL\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;33m3\.5\x1b\[0m/);
+		assert.equal((line!.match(/\x1b\[38;5;33m/g) ?? []).length, 5);
 	});
 
 	it("colors C builtin types with the type role (nvim @type), distinct from keywords", () => {
@@ -223,7 +223,7 @@ describe("renderCode", () => {
 				startLine: 1,
 				lines: ["int main() { return sizeof(int); }"],
 			}, undefined, WIDE);
-			assert.match(line!, /\x1b\[90m│\x1b\[0m \x1b\[22mint\x1b\[0m main\(\) \{ \x1b\[31mreturn\x1b\[0m \x1b\[31msizeof\x1b\[0m\(\x1b\[22mint\x1b\[0m\); \}/);
+			assert.match(line!, /\x1b\[38;5;90m│\x1b\[0m \x1b\[38;5;22mint\x1b\[0m main\(\) \{ \x1b\[38;5;31mreturn\x1b\[0m \x1b\[38;5;31msizeof\x1b\[0m\(\x1b\[38;5;22mint\x1b\[0m\); \}/);
 
 			// `struct`/`union` are statement keywords, not type names: keyword role.
 			const [structLine] = renderCode({
@@ -231,7 +231,7 @@ describe("renderCode", () => {
 				startLine: 1,
 				lines: ["struct Point { int x; };"],
 			}, undefined, WIDE);
-			assert.match(structLine!, /\x1b\[90m│\x1b\[0m \x1b\[31mstruct\x1b\[0m Point \{ \x1b\[22mint\x1b\[0m x; \}/);
+			assert.match(structLine!, /\x1b\[38;5;90m│\x1b\[0m \x1b\[38;5;31mstruct\x1b\[0m Point \{ \x1b\[38;5;22mint\x1b\[0m x; \}/);
 		} finally {
 			applyTheme(DEFAULT_CONFIG.theme);
 		}
@@ -246,11 +246,11 @@ describe("renderCode", () => {
 			}, undefined, WIDE);
 			// The whole `<main+77>` is ONE label-role token (dim gray by default),
 			// while the symbol COLUMN keeps the `function` role; the address and
-			// mnemonic are untouched. Codes >= 128 use the 256-colour `38;5;` form.
-			assert.match(line!, /\x1b\[95m<main>[ ]+\x1b\[0m/);
+			// mnemonic are untouched. Every role uses the 256-colour `38;5;` form.
+			assert.match(line!, /\x1b\[38;5;95m<main>[ ]+\x1b\[0m/);
 			assert.match(line!, /\x1b\[38;5;245m<main\+77>\x1b\[0m/);
-			assert.match(line!, /\x1b\[93mne\x1b\[0m/);
-			assert.match(line!, /\x1b\[33m0x555555555176\x1b\[0m/);
+			assert.match(line!, /\x1b\[38;5;93mne\x1b\[0m/);
+			assert.match(line!, /\x1b\[38;5;33m0x555555555176\x1b\[0m/);
 		} finally {
 			applyTheme(DEFAULT_CONFIG.theme);
 		}
@@ -261,8 +261,8 @@ describe("renderCode", () => {
 			kind: "assembly",
 			instructions: [{ address: "0x401126", symbol: "main", instruction: "push %rbp", current: true }],
 		}, undefined, WIDE);
-		assert.ok(line!.startsWith("\x1b[1m\x1b[36m▶"), `expected a bold-accent wrap: ${JSON.stringify(line)}`);
-		assert.ok(/\x1b\[1m\x1b\[36m \x1b\[93mpush\x1b\[0m\x1b\[1m\x1b\[36m \x1b\[94m%rbp\x1b\[0m\x1b\[1m\x1b\[36m\x1b\[0m$/.test(line!), `expected token re-open inside the wrap: ${JSON.stringify(line)}`);
+		assert.ok(line!.startsWith("\x1b[1m\x1b[38;5;36m▶"), `expected a bold-accent wrap: ${JSON.stringify(line)}`);
+		assert.ok(/\x1b\[1m\x1b\[38;5;36m \x1b\[38;5;93mpush\x1b\[0m\x1b\[1m\x1b\[38;5;36m \x1b\[38;5;94m%rbp\x1b\[0m\x1b\[1m\x1b\[38;5;36m\x1b\[0m$/.test(line!), `expected token re-open inside the wrap: ${JSON.stringify(line)}`);
 	});
 
 	it("renders assembly instructions with a current-PC marker", () => {
@@ -329,13 +329,13 @@ describe("renderCode", () => {
 			kind: "assembly",
 			instructions: [{ address: "0x401126", symbol: "main", instruction: "push %rbp" }],
 		}, undefined, WIDE);
-		// The mnemonic gets the `mnemonic` role (\x1b[93m) and `<main>` the
-		// `function` role (\x1b[95m); operands resolve via the asm lexer
-		// (registers \x1b[94m, immediates/numbers \x1b[33m) — no more bold-accent
+		// The mnemonic gets the `mnemonic` role (\x1b[38;5;93m) and `<main>` the
+		// `function` role (\x1b[38;5;95m); operands resolve via the asm lexer
+		// (registers \x1b[38;5;94m, immediates/numbers \x1b[38;5;33m) — no more bold-accent
 		// on the mnemonic nor the operand symbols.
-		assert.match(line!, /\x1b\[95m<main>[ ]+\x1b\[0m/);
-		assert.match(line!, /\x1b\[93mpush\x1b\[0m/);
-		assert.match(line!, /\x1b\[94m%rbp\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;95m<main>[ ]+\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;93mpush\x1b\[0m/);
+		assert.match(line!, /\x1b\[38;5;94m%rbp\x1b\[0m/);
 	});
 
 	it("renders source lines with mapped instructions beneath them", () => {
@@ -417,7 +417,7 @@ describe("renderTree", () => {
 
 		const line = renderTree({ kind: "tree", tree: after }, { kind: "tree", tree: before }, WIDE)[1]!;
 
-		assert.ok(line.includes("\x1b[33m = 100 ▲\x1b[0m"));
+		assert.ok(line.includes("\x1b[38;5;33m = 100 ▲\x1b[0m"));
 	});
 
 	it("flags unexpanded children with an ellipsis", () => {
@@ -434,9 +434,9 @@ describe("renderTable", () => {
 
 		const lines = renderTable(snap, prev, WIDE);
 
-		assert.match(lines[0]!, /\x1b\[33m0x1\x1b\[0m/);
-		assert.ok(!lines[1]!.includes("\x1b[33m"));
-		assert.equal(lines[0]!.replace(/\x1b\[\d+m/g, "").length, lines[1]!.length);
+		assert.match(lines[0]!, /\x1b\[38;5;33m0x1\x1b\[0m/);
+		assert.ok(!lines[1]!.includes("\x1b[38;5;33m"));
+		assert.equal(lines[0]!.replace(/\x1b\[\d+(;5;\d+)?m/g, "").length, lines[1]!.length);
 	});
 });
 
