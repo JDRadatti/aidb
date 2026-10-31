@@ -84,7 +84,9 @@ export interface SessionsConfig {
 	historyPath: string;
 	/** Directory future session snapshots (breakpoints/layout) will live in. */
 	sessionDir: string;
-	/** Disable auto-saving sessions on every change (default: on). */
+	/** Disable auto-saving sessions on every change (default: off — mirroring
+	 * layouts, sessions/targets persist only via explicit `/session save` and
+	 * `/target save`; flip to true to auto-save on every change). */
 	autoSave: boolean;
 }
 
@@ -201,7 +203,7 @@ export const DEFAULT_CONFIG: Config = {
 	sessions: {
 		historyPath: path.join(HOME, ".aidb_history"),
 		sessionDir: path.join(HOME, ".config", "aidb", "sessions"),
-		autoSave: true,
+		autoSave: false,
 	},
 	windows: {},
 	agent: {},

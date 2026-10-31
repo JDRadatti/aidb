@@ -114,19 +114,19 @@ export function renderIntro(state: IntroState): string[] {
 	push(DIVIDER);
 
 	/* [sessions] — one indented line per saved session. */
-	for (const line of collectionLines(
-		"sessions",
-		state.sessions.map(sessionItem),
-		state.autoSave ? "none yet — set up a target and this session auto-saves here"
-			: "off — sessions.autoSave is false in the config",
-	)) push(line);
+		for (const line of collectionLines(
+			"sessions",
+			state.sessions.map(sessionItem),
+			state.autoSave ? "none yet — set up a target and this session auto-saves here"
+				: "none yet — /session save <name> keeps this setup",
+		)) push(line);
 
 	/* [targets] */
-	for (const line of collectionLines(
-		"targets",
-		state.targets.map(targetItem),
-		"none yet — run <program> [args…] creates one",
-	)) push(line);
+		for (const line of collectionLines(
+			"targets",
+			state.targets.map(targetItem),
+			"none yet — /target save <name> keeps a program + args",
+		)) push(line);
 
 	/* [layouts] */
 	for (const line of collectionLines(

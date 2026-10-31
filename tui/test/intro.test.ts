@@ -74,11 +74,11 @@ describe("renderIntro", () => {
 		assert.ok(layoutRows.some((line) => line.includes("single · 1 pane · 0 watch")));
 	});
 
-	it("says sessions are off instead of listing when auto-save is disabled", () => {
+	it("points at /session save instead of listing when auto-save is disabled", () => {
 		const lines = renderIntro(freshState({ autoSave: false })).map(plain);
 		const i = lines.findIndex((line) => line === "[sessions]");
 		assert.ok(i !== -1);
-		assert.ok(lines[i + 1]!.includes("off"));
+		assert.ok(lines[i + 1]!.includes("/session save"));
 	});
 
 	it("caps every line to the banner width (ANSI-aware)", () => {

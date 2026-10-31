@@ -13,7 +13,10 @@
 - locals watch mode
 - remove address of assmbly
 - search through current buffer with /
-
+- si should be step inside when source view is active
+- stdin and stdout do not work
+- project (owns targets)
+/
 
 # NEXT — do these first
 1. Whole-memory pane: a `mem` view that renders a paged window over all of

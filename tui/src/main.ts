@@ -1110,7 +1110,7 @@ async function resolveStartupSession(): Promise<void> {
 	} else if (resume) {
 		const list = store().sessions.list();
 		if (list.length === 0) {
-			replCtx.io.info("No saved sessions to resume. Set up a target and it will auto-save.");
+			replCtx.io.info("No saved sessions to resume. /session save <name> keeps one.");
 		} else {
 			// For now --resume restores the most recent saved session.
 			await restoreSession(list[list.length - 1]!.name);
